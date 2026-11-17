@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import unittest
 import tempfile
+import csv
 import numpy as np
 from detector import load_pad_records, channel_to_pad, pad_rect_mm, pad_number
 from detector import passes_hit_cuts, select_hit_mask, rejected_events_for_run
@@ -24,8 +25,8 @@ class PadMappingTests(unittest.TestCase):
         self.reference_db = CutDatabase(path)
 
     def test_wiring_anchors_and_section_transition(self):
-        anchors = {153: 0, 151: 1, 149: 2, 147: 3, 16: 24, 163: 25,
-                   128: 249, 505: 250, 431: 409, 576: 395, 568: 399}
+        anchors = {505: 0, 487: 1, 431: 159, 153: 160, 151: 161,
+                   149: 162, 147: 163, 16: 184, 163: 185, 128: 409, 576: 145, 568: 149}
         for fadc, pad in anchors.items():
             self.assertEqual(int(channel_to_pad(fadc - 1)), pad)
 
@@ -37,15 +38,37 @@ class PadMappingTests(unittest.TestCase):
         # Printed fADC 1,2,3,129,144 are not present in either wiring diagram.
         np.testing.assert_array_equal(channel_to_pad([-1, 0, 1, 2, 128, 143, 999]), -np.ones(7))
 
-    def test_geometry_covers_board_once_with_large_above_medium(self):
+    def test_migration_table_and_row_order_match_current_wiring(self):
+        path = Path(__file__).resolve().parents[1] / 'auxiliary/pad_renumbering.csv'
+        with path.open(newline='') as stream:
+            migration = list(csv.DictReader(stream))
+        records = load_pad_records()
+        self.assertEqual(sorted(int(r['OldPad']) for r in migration), list(range(410)))
+        for r in migration:
+            old, new = int(r['OldPad']), int(r['Pad'])
+            self.assertEqual(new, old + 160 if old < 250 else old - 250)
+            current = records[new]
+            self.assertEqual((current['FADC'], current['Channel'], current['PadSize']),
+                             (int(r['FADC']), int(r['Channel']), r['PadSize']))
+        # All rows retain their left-to-right wiring order, without serpentine reversal.
+        for size, count, columns, offset in [('Large', 160, 20, 0), ('Medium', 250, 25, 160)]:
+            for index in range(count):
+                r = records[offset + index]
+                self.assertEqual((r['PadSize'], r['Row'], r['Col']), (size, index // columns, index % columns))
+        self.assertEqual((records[0]['X_mm'], records[0]['Y_mm']), (0, 0))
+        self.assertEqual((records[160]['X_mm'], records[160]['Y_mm']), (0, 40))
+
+    def test_geometry_covers_board_once_with_large_below_medium(self):
         coverage = np.zeros((80, 100), dtype=int)
         for r in load_pad_records():
             x, y, w, h = pad_rect_mm(r['PadSize'], r['Row'], r['Col'])
             self.assertEqual((x, y, w, h), (r['X_mm'], r['Y_mm'], r['Width_mm'], r['Height_mm']))
             self.assertEqual(pad_number(r['PadSize'], r['Row'], r['Col']), r['Pad'])
-            if r['Pad'] < 250:
+            if r['PadSize'] == 'Large':
+                self.assertLess(r['Pad'], 160)
                 self.assertLess(y, 40)
             else:
+                self.assertGreaterEqual(r['Pad'], 160)
                 self.assertGreaterEqual(y, 40)
             x, y, w, h = map(int, (x, y, w, h))
             coverage[y:y+h, x:x+w] += 1
@@ -54,14 +77,14 @@ class PadMappingTests(unittest.TestCase):
     def test_cuts_keep_electronics_meaning(self):
         # A fixed reference selection must not constrain the user's live DB.
         passes = lambda channel,time: bool(self.reference_db.keep({'Channel':[channel], 'Time':[time]})[0])
-        self.assertTrue(passes(148, 227))  # fADC149 / pad2
-        self.assertFalse(passes(149, 227))  # reference excludes Channel149, pad9
+        self.assertTrue(passes(148, 227))  # fADC149 / pad162
+        self.assertFalse(passes(149, 227))  # reference excludes Channel149, pad169
         self.assertFalse(passes(148, 228))
         self.assertTrue(passes(285, 100))
         self.assertTrue(passes(335, 100))
         self.assertTrue(passes(575, 227))
         self.assertFalse(passes(271, 100))
-        self.assertEqual(int(channel_to_pad(149)), 9)
+        self.assertEqual(int(channel_to_pad(149)), 169)
 
     def test_raw_hit_mask_keeps_multiplicity_and_distinct_analysis_profiles(self):
         # Repeated pulses on Channel148 are distinct raw rows. The display

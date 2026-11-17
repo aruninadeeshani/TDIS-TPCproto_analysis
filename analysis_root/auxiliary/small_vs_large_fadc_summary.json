@@ -1,0 +1,22 @@
+{
+  "comparison": "Exact one-based fADC label membership for connected pads; expert-confirmed577/579 omitted",
+  "large_pad_count": 160,
+  "largest_large_fadc": 576,
+  "largest_large_pad": 145,
+  "connected_small_pad_count": 256,
+  "small_with_large_counterpart": 159,
+  "small_without_large_counterpart": 97,
+  "small_without_large_counterpart_ranges": "288-296, 313-335, 344-359, 432-439, 456-480, 489-504",
+  "small_above_large_maximum": [],
+  "disconnected_small_labels": [
+    577,
+    579
+  ],
+  "large_fadc_absent_from_small": [
+    576
+  ],
+  "source_sha256": {
+    "pad_map.csv": "3093730c058a2be5d8adb704606071ef3ebc7a33bc775c4ba96cfec1ddd3308c",
+    "pad_map_medium_small.csv": "372348eb2816e833675383bc4138d13a2b05b2ccb02276cda33cc3041659719a"
+  }
+}

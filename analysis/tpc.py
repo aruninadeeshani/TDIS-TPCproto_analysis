@@ -34,7 +34,52 @@ from detector import (DEFAULT_INPUT_DIR, DEFAULT_PAD_MAP, SETTINGS_FILE,
     pad_rect_mm, pad_number, passes_hit_cuts, select_event_hits,
     rejected_events_for_run, load_hit_arrays, results_directory, DEFAULT_CUTS_DB, DEFAULT_BINNING,
     CutDatabase, cut_database, select_hit_mask, raw_histogram_spec, DEFAULT_VOLTAGE_STUDY_DB,
-    DEFAULT_2D_PLOTS, load_2d_plots, raw_2d_axes)
+    DEFAULT_2D_PLOTS, load_2d_plots, raw_2d_axes, resolve_pad_map, SETUP_MAPS)
+
+
+def run_context(args, run):
+    """Resolve metadata even for UNCUT plots; keep one mapping for cuts/drawing.
+
+    Retain the user's explicit CSV override separately so a multi-run examples
+    call can resolve a different setup for each run.
+    """
+    if not hasattr(args, '_pad_map_override'):
+        args._pad_map_override = args.pad_map
+    database = cut_database(args.cuts_db)
+    args.pad_map = resolve_pad_map(database, run, getattr(args, 'setup', None), args._pad_map_override)
+    info = database.run_info(run, getattr(args, 'setup', None))
+    info.update(pad_map=str(args.pad_map.resolve()), mapping_override=args._pad_map_override is not None)
+    args.run_info = info
+    return info
+
+
+def run_results(args):
+    root = results_directory(args.input_dir)
+    if args.run_info['mapping_override']:
+        root /= 'setups/custom'
+    elif args.run_info['setup'] != 'large_medium':
+        root = root / 'setups' / args.run_info['setup']
+    return root
+
+
+def save_run_info(args, directory):
+    """Save the effective setup and informational quantities beside exports."""
+    (directory / 'run_info.json').write_text(json.dumps(args.run_info, indent=2) + '\n')
+    (directory / 'pad_map_used.csv').write_bytes(args.pad_map.read_bytes())
+
+
+def run_label(args):
+    """Show nondefault setup/known metadata, retaining existing default titles."""
+    info = args.run_info
+    if (info['setup'] == 'large_medium' and info['drift_voltage_v'] is None
+            and info['tilt_angle_deg'] is None and not info['mapping_override']):
+        return ''
+    parts = [info['setup'] + (' (CSV override)' if info['mapping_override'] else '')]
+    if info['drift_voltage_v'] is not None:
+        parts.append(f"drift {info['drift_voltage_v']:g} V")
+    if info['tilt_angle_deg'] is not None:
+        parts.append(f"tilt {info['tilt_angle_deg']:g} deg")
+    return '\n' + ' | '.join(parts)
 
 # ---- Drawing only: change styles here without changing hit selection ----
 def render_2d(ax, pad_map, values_by_channel, cmap='plasma', title="", show_pad_numbers=True):
@@ -47,20 +92,23 @@ def render_2d(ax, pad_map, values_by_channel, cmap='plasma', title="", show_pad_
     vals = list(values_by_channel.values())
     vmax = max(vals) if vals else 1.0
     patches, colors = [], []
-    for ch, (size, row, col) in pad_map.items():
-        xlo, ylo, w, h = pad_rect_mm(size, row, col)
+    for xlo, ylo, w, h in pad_map.blanks:
+        ax.add_patch(Rectangle((xlo, ylo), w, h, facecolor='white', edgecolor='#bbbbbb', linewidth=.2))
+    for r in pad_map.records:
+        ch = r['Channel']
+        xlo, ylo, w, h = (r[k] for k in ('X_mm', 'Y_mm', 'Width_mm', 'Height_mm'))
         val = values_by_channel.get(ch, 0)
         patches.append(Rectangle((xlo, ylo), w, h))
         colors.append(val)
         if show_pad_numbers:
-            ax.text(xlo + w / 2, ylo + h / 2, str(pad_number(size, row, col)),
+            ax.text(xlo + w / 2, ylo + h / 2, str(r['Pad']),
                     ha='center', va='center', fontsize=4.5, color='white' if val < vmax / 2 else 'black', zorder=3)
     pc = PatchCollection(patches, cmap=cmap, edgecolor='black', linewidth=0.2)
     pc.set_array(np.array(colors))
     pc.set_clim(0, vmax if vmax > 0 else 1)
     ax.add_collection(pc)
-    ax.set_xlim(0, BOARD_WIDTH_MM)
-    ax.set_ylim(0, BOARD_HEIGHT_MM)
+    ax.set_xlim(0, pad_map.width)
+    ax.set_ylim(0, pad_map.height)
     ax.set_aspect('equal')
     ax.set_xlabel("x (mm)"); ax.set_ylabel("y (mm)")
     ax.set_title(title)
@@ -74,8 +122,9 @@ def render_3d(ax, pad_map, values_by_channel, cmap='plasma', title=""):
     value. Only ~410 bars total (one per pad), not one per mm -- much
     lighter than a rasterized fine grid would be."""
     xs, ys, dxs, dys, dzs = [], [], [], [], []
-    for ch, (size, row, col) in pad_map.items():
-        xlo, ylo, w, h = pad_rect_mm(size, row, col)
+    for r in pad_map.records:
+        ch = r['Channel']
+        xlo, ylo, w, h = (r[k] for k in ('X_mm', 'Y_mm', 'Width_mm', 'Height_mm'))
         val = values_by_channel.get(ch, 0)
         xs.append(xlo); ys.append(ylo); dxs.append(w); dys.append(h); dzs.append(val)
     dzs = np.array(dzs)
@@ -86,8 +135,8 @@ def render_3d(ax, pad_map, values_by_channel, cmap='plasma', title=""):
     ax.bar3d(xs, ys, np.zeros_like(dzs), dxs, dys, dzs, color=colors, shade=True)
     ax.set_xlabel("x (mm)"); ax.set_ylabel("y (mm)"); ax.set_zlabel("value")
     ax.set_title(title)
-    ax.set_xlim(0, BOARD_WIDTH_MM); ax.set_ylim(0, BOARD_HEIGHT_MM)
-    ax.set_box_aspect((BOARD_WIDTH_MM, BOARD_HEIGHT_MM, 50))
+    ax.set_xlim(0, pad_map.width); ax.set_ylim(0, pad_map.height)
+    ax.set_box_aspect((pad_map.width, pad_map.height, 50))
 
 
 # ---- Single-event navigation/export ----
@@ -112,8 +161,9 @@ def load_tree_arrays(root_filename, tree_name="ntuple"):
 
 
 def run_event(args):
+    run_context(args, args.run_number)
     if args.save and args.output_dir is None:
-        args.output_dir = results_directory(args.input_dir) / 'events' / f'run{args.run_number}'
+        args.output_dir = run_results(args) / 'events' / f'run{args.run_number}'
     if not args.output_dir:
         plt.switch_backend('TkAgg')
 
@@ -129,7 +179,7 @@ def run_event(args):
     database = cut_database(args.cuts_db)
     print(f"Loaded {len(events)} hit entries.")
 
-    vetoes = rejected_events_for_run(args.run_number, args.veto_file or default_veto_file(args.input_dir))
+    vetoes = rejected_events_for_run(args.run_number, args.veto_file or default_veto_file(args.input_dir, args.run_number, args.run_info['setup']))
     accepted = select_hit_mask(events, channels, times, vetoes, run=args.run_number,
                                cuts_db=database, arrays=arrays, pad_map=args.pad_map)
     mapped = channel_to_pad(channels, args.pad_map) >= 0
@@ -165,13 +215,13 @@ def run_event(args):
         fig_charge.clear()
         ax_c = fig_charge.add_subplot(111, projection='3d' if args.mode == '3d' else None)
         render_fn(ax_c, pad_map, charge_by_channel,
-                  title=f"Charge - Run {args.run_number} - Event {target_event}")
+                  title=f"Charge - Run {args.run_number} - Event {target_event}" + run_label(args))
         fig_charge.canvas.draw_idle()
 
         fig_time.clear()
         ax_t = fig_time.add_subplot(111, projection='3d' if args.mode == '3d' else None)
         render_fn(ax_t, pad_map, time_by_channel, cmap='viridis',
-                  title=f"Time - Run {args.run_number} - Event {target_event}")
+                  title=f"Time - Run {args.run_number} - Event {target_event}" + run_label(args))
         fig_time.canvas.draw_idle()
 
         if not args.output_dir:
@@ -187,6 +237,7 @@ def run_event(args):
             raise ValueError(f"Event {target} is vetoed or has no mapped hits passing the cuts")
         args.output_dir.mkdir(parents=True, exist_ok=True)
         draw_event(target)
+        save_run_info(args, args.output_dir)
         for name, fig in [('charge', fig_charge), ('time', fig_time)]:
             for suffix in ('png', 'pdf'):
                 fig.savefig(args.output_dir / f"event_{args.run_number}_{target}_{name}.{suffix}", dpi=180)
@@ -232,14 +283,15 @@ def run_examples(args):
     out = args.output_dir or results_directory(args.input_dir) / 'events'
     comparison_dir = out / 'comparisons'
     comparison_dir.mkdir(parents=True, exist_ok=True)
-    pad_map = load_pad_map(args.pad_map)
     database = cut_database(args.cuts_db)
     comparison, axes = plt.subplots(len(examples), 2, figsize=(18, 7.5 * len(examples)), squeeze=False)
     rows = []
     for i, (run, event) in enumerate(examples):
+        run_context(args, run)
+        pad_map = load_pad_map(args.pad_map)
         arrays, root_file = load_hit_arrays(args.input_dir / f'ntuple{run}.root')
         events, channels, times, charges = (arrays[name] for name in ('Event', 'Channel', 'Time', 'Charge'))
-        vetoes = rejected_events_for_run(run, args.veto_file or default_veto_file(args.input_dir))
+        vetoes = rejected_events_for_run(run, args.veto_file or default_veto_file(args.input_dir, run, args.run_info['setup']))
         if event in vetoes:
             raise ValueError(f'Run {run}, event {event} is noise-vetoed')
         hits = [(ch, q, t) for ch, q, t in select_event_hits(events, channels, times, charges, event, vetoes,
@@ -251,30 +303,33 @@ def run_examples(args):
         # The CSV records precisely these plotted hits, not all raw pulses.
         pads = channel_to_pad([h[0] for h in hits], args.pad_map)
         for pad, (channel, charge, time) in zip(pads, hits):
-            rows.append(dict(run=run, event=event, pad=int(pad), fadc=int(channel)+1,
+            rows.append(dict(run=run, setup=args.run_info['setup'], event=event, pad=int(pad), fadc=int(channel)+1,
                              root_channel=int(channel), charge=int(charge), time=int(time)))
         for mode, renderer in [('2d', render_2d), ('3d', render_3d)]:
-            dest = out / f'run{run}'
+            dest = (args.output_dir or run_results(args) / 'events') / f'run{run}'
             if mode == '3d':
                 dest /= '3d'
             dest.mkdir(parents=True, exist_ok=True)
+            save_run_info(args, dest)
             for j, (name, values, cmap) in enumerate([
                 ('charge', {ch: q for ch, q, t in hits}, 'plasma'),
                 ('time', {ch: t for ch, q, t in hits}, 'viridis')]):
                 fig = plt.figure(figsize=(10, 9))
                 ax = fig.add_subplot(111, projection='3d' if mode == '3d' else None)
-                renderer(ax, pad_map, values, cmap=cmap, title=f'{name.title()} - Run {run} - Event {event}')
+                renderer(ax, pad_map, values, cmap=cmap, title=f'{name.title()} - Run {run} - Event {event}' + run_label(args))
                 for ext in ('png', 'pdf'):
                     fig.savefig(dest / f'event_{run}_{event}_{name}.{ext}', dpi=180)
                 plt.close(fig)
                 if mode == '2d':
                     render_2d(axes[i, j], pad_map, values, cmap=cmap,
-                              title=f'Run {run} | Event {event} | {name.title()} | {len(hits)} pads')
+                              title=f'Run {run} | Event {event} | {name.title()} | {len(hits)} pads' + run_label(args))
         root_file.Close()
-        print(f'Run {run}, event {event}: {(pads < 250).sum()} medium, {(pads >= 250).sum()} large pads', flush=True)
+        sections = {r['Channel']: r['PadSize'] for r in load_pad_records(args.pad_map)}
+        large = sum(sections[ch] == 'Large' for ch, q, t in hits)
+        print(f'Run {run}, event {event}: {len(hits)} connected pads ({args.run_info['setup']})', flush=True)
     # Comparison filenames encode the chosen runs for easy sharing.
     tag = '_'.join(str(run) for run, event in examples)
-    comparison.suptitle('Numbered event displays — medium pads 0–249 below large pads 250–409', fontsize=17)
+    comparison.suptitle('Numbered event displays — each run uses its selected detector setup', fontsize=17)
     comparison.text(0.5, 0.025, database.describe() + '; per-run DB rules' + '; saved event vetoes; first passing hit per channel. Both sections included.', ha='center', fontsize=10)
     comparison.tight_layout(rect=(0, 0.05, 1, 0.96))
     for ext in ('png', 'pdf'):
@@ -291,6 +346,7 @@ def run_examples(args):
 # ---- Common inspection input: one reading and selection for both groups ----
 def inspection_data(args):
     """Keep mapping, detector cuts and event vetoes identical in 1D and 2D."""
+    run_context(args, args.run_number)
     arrays, source = load_hit_arrays(args.input_dir / f'ntuple{args.run_number}.root')
     try:
         arrays['Pad'] = channel_to_pad(arrays['Channel'], args.pad_map)
@@ -298,10 +354,12 @@ def inspection_data(args):
         database = cut_database(args.cuts_db) if args.apply_cuts else None
         keep = np.ones(len(arrays['Event']), dtype=bool)
         if args.apply_cuts:
-            vetoes = rejected_events_for_run(args.run_number, args.veto_file or default_veto_file(args.input_dir))
+            vetoes = rejected_events_for_run(args.run_number, args.veto_file or default_veto_file(args.input_dir, args.run_number, args.run_info['setup']))
             keep = select_hit_mask(arrays['Event'], arrays['Channel'], arrays['Time'], vetoes,
                                    run=args.run_number, cuts_db=database, arrays=arrays, pad_map=args.pad_map)
-        return dict(arrays=arrays, source=source, database=database, keep=keep)
+        records = load_pad_records(args.pad_map)
+        return dict(arrays=arrays, source=source, database=database, keep=keep,
+                    pad_count=len(records), channel_count=max(r['Channel'] for r in records)+1)
     except Exception:
         source.Close()
         raise
@@ -336,7 +394,7 @@ def run_raw(args, *, inspection=None, defer_show=False):
     summary_branches = [b for b in preferred if b in arrays] if not args.branches else []
     database, keep = data['database'], data['keep']
     profile = 'clean' if args.apply_cuts else 'raw'
-    out = args.output_dir or results_directory(args.input_dir) / 'raw' / f'run{args.run_number}'
+    out = args.output_dir or run_results(args) / 'raw' / f'run{args.run_number}'
     if args.apply_cuts:
         out = out / 'cleaned'
     if args.branches:
@@ -361,26 +419,28 @@ def run_raw(args, *, inspection=None, defer_show=False):
         root_summary = ROOT.TCanvas(canvas_stem, f'Run {args.run_number} | {profile}', columns * 500, rows * 360)
         root_summary.Divide(columns, rows)
     ROOT.TNamed('selection', 'UNCUT: all raw hit rows' if profile == 'raw' else database.describe(args.run_number)).Write()
+    ROOT.TNamed('run_info', json.dumps(args.run_info)).Write()
     ROOT.TNamed('mapping', f'{args.pad_map}: Pad from ROOT Channel; FADC=Channel+1; Pad=-1 is unmapped (underflow)').Write()
     metadata = dict(run=args.run_number, selection=profile, total_rows=len(keep), selected_rows=int(keep.sum()),
                     cuts_applied=bool(args.apply_cuts), cuts_db=str(database.path) if args.apply_cuts else None,
-                    pad_map=str(args.pad_map.resolve()), unmapped_rows=int((arrays['Pad'] < 0).sum()),
+                    run_info=args.run_info, pad_map=str(args.pad_map.resolve()), unmapped_rows=int((arrays['Pad'] < 0).sum()),
                     selected_unmapped_rows=int(((arrays['Pad'] < 0) & keep).sum()),
                     summary_branches=summary_branches,
                     histograms=[])
     # Carry the actual wiring table alongside the outputs for reproducibility.
-    (out / 'pad_map_used.csv').write_bytes(args.pad_map.read_bytes())
+    save_run_info(args, out)
     for branch in branches:
         values = arrays[branch][keep]
         # Base axes on the uncut column so raw/clean comparisons have
         # identical automatic edges, including the bins removed by cuts.
-        edges, log_y = raw_histogram_spec(arrays[branch], branch, args.bins, args.bin_width, args.range, args.log_y, args.binning_file)
+        edges, log_y = raw_histogram_spec(arrays[branch], branch, args.bins, args.bin_width, args.range, args.log_y, args.binning_file,
+                                         pad_count=data['pad_count'], channel_count=data['channel_count'])
         finite = values[np.isfinite(values)]
         # Match ROOT's [low, high) convention, including the LAST bin.
         inside = (finite >= edges[0]) & (finite < edges[-1])
         counts, _ = np.histogram(finite[inside], bins=edges)
         under = int((finite < edges[0]).sum()); over = int((finite >= edges[-1]).sum())
-        title = f'Run {args.run_number} | {profile.upper()} | {branch}'
+        title = f'Run {args.run_number} | {profile.upper()} | {branch}' + run_label(args)
         axis_label = 'Pad number (0-based)' if branch == 'Pad' else f'{branch} (native values)'
         if branch == 'Channel':
             axis_label = 'ROOT Channel (0-based, fADC = Channel + 1)'
@@ -481,7 +541,7 @@ def run_raw2d(args, *, inspection=None, defer_show=False):
         if unknown: raise ValueError(f'Unknown 2D plot names: {sorted(unknown)}')
         definitions = [p for p in definitions if p['Name'] in args.plots]
     database, keep = data['database'], data['keep']
-    out = args.output_dir or results_directory(args.input_dir) / 'raw' / f'run{args.run_number}'
+    out = args.output_dir or run_results(args) / 'raw' / f'run{args.run_number}'
     if args.apply_cuts: out /= 'cleaned'
     out /= '2d'
     if args.plots: out /= 'plots_' + '_'.join(p['Name'] for p in definitions)
@@ -490,11 +550,12 @@ def run_raw2d(args, *, inspection=None, defer_show=False):
     unmapped = int(((arrays['Pad'] < 0) & keep).sum())
     metadata = dict(run=args.run_number, selection=profile, total_rows=len(keep),
                     selected_rows=int(keep.sum()), selected_unmapped_hits=unmapped,
-                    cuts_db=str(database.path) if database else None, histograms=[])
+                    cuts_db=str(database.path) if database else None, run_info=args.run_info, histograms=[])
     for path, name in [(args.pad_map, 'pad_map_used.csv'), (args.plots_file, 'raw_2d_plots_used.csv'),
                        (args.binning_file, 'raw_binning_used.csv')]:
         (out / name).write_bytes(path.read_bytes())
 
+    save_run_info(args, out)
     import ROOT
     from matplotlib.colors import LogNorm, Normalize
     previous_batch = ROOT.gROOT.IsBatch()
@@ -511,16 +572,18 @@ def run_raw2d(args, *, inspection=None, defer_show=False):
             root_summary = ROOT.TCanvas(stem, f'Run {args.run_number} | {profile} | 2D summary', columns * 650, rows * 500)
             root_summary.Divide(columns, rows); root_canvases.append(root_summary)
         ROOT.TNamed('selection', database.describe(args.run_number) if database else 'UNCUT: all raw hits; no vetoes').Write()
+        ROOT.TNamed('run_info', json.dumps(args.run_info)).Write()
         ROOT.TNamed('mapping', 'Pad from established mapping; Pad=-1 for unconnected channels, retained in flow cells').Write()
         for index, plot in enumerate(definitions):
             name, xfield, yfield = plot['Name'], plot['X'], plot['Y']
-            xedges, yedges = raw_2d_axes(arrays, plot, args.binning_file)
+            xedges, yedges = raw_2d_axes(arrays, plot, args.binning_file,
+                                        pad_count=data['pad_count'], channel_count=data['channel_count'])
             nx, ny = len(xedges) - 1, len(yedges) - 1
             def label(field, edges):
                 base = {'Pad': 'Pad number (0-based)', 'Event': 'Event ID', 'Hit': 'Hit (pulse index)'}.get(field, f'{field} (native values)')
                 return base + f' [bin width {edges[1]-edges[0]:g}]'
             xlabel, ylabel = label(xfield, xedges), label(yfield, yedges)
-            title = f'Run {args.run_number} | {profile} | {yfield} vs {xfield}'
+            title = f'Run {args.run_number} | {profile} | {yfield} vs {xfield}' + run_label(args)
             histogram = ROOT.TH2D(f'raw2d_{name}', f'{title};{xlabel};{ylabel};Raw Hits',
                                   nx, float(xedges[0]), float(xedges[-1]), ny, float(yedges[0]), float(yedges[-1]))
             histogram.SetDirectory(0); histogram.SetStats(False); histogram.SetOption('COLZ')
@@ -640,7 +703,8 @@ def common_arguments(parser):
                         help='Directory containing ntupleNNNN.root; defaults to data/root/')
     parser.add_argument('--output-dir', type=Path,
                         help='Where to save plots; default under results/python/ for the chosen workflow')
-    parser.add_argument('--pad-map', type=Path, default=DEFAULT_PAD_MAP)
+    parser.add_argument('--pad-map', type=Path, help='Explicit CSV override; otherwise select mapping from run DB')
+    parser.add_argument('--setup', choices=tuple(SETUP_MAPS), help='Override the run DB detector setup')
     parser.add_argument('--cuts-db', type=Path, default=DEFAULT_CUTS_DB, help='Shared detector global/run rejection database')
     parser.add_argument('--veto-file', type=Path,
                         help='Run/event veto CSV; otherwise use live output or bundled auxiliary snapshot')
@@ -693,6 +757,7 @@ def make_parser():
     common_arguments(raw2d)
     cuts = commands.add_parser('cuts', help='List the DB rejection rules active for a run')
     cuts.add_argument('run_number', type=int)
+    cuts.add_argument('--setup', choices=tuple(SETUP_MAPS))
     cuts.add_argument('--cuts-db', type=Path, default=DEFAULT_CUTS_DB)
     scan = commands.add_parser('voltage' , help='Independent voltage study and noise audits')
     # ROOT is needed only by this workflow or by the lazy input reader.
@@ -701,6 +766,9 @@ def make_parser():
     voltage.add_arguments(scan)
     info = commands.add_parser('info', help='Print current cuts, mapping size, and input locations')
     info.add_argument('--input-dir', type=Path, default=DEFAULT_INPUT_DIR)
+    info.add_argument('--run', dest='run_number', type=int, help='Resolve setup and metadata for this run')
+    info.add_argument('--setup', choices=tuple(SETUP_MAPS))
+    info.add_argument('--pad-map', type=Path)
     info.add_argument('--cuts-db', type=Path, default=DEFAULT_CUTS_DB)
     commands.add_parser('check', help='Run the detector/mapping regression checks')
     return parser
@@ -763,6 +831,7 @@ def main(argv=None):
     elif args.command == 'cuts':
         database = cut_database(args.cuts_db)
         print(database.path)
+        print('Run configuration:', database.run_info(args.run_number, args.setup))
         for rule in database.active(args.run_number):
             print(f'[{rule.section}] line {rule.line}: REJECT {rule.expression}' + (f' # {rule.note}' if rule.note else ''))
         print(f'\nRules listed only; no plots opened. To apply cuts and plot: python analysis/tpc.py raw {args.run_number} --apply-cuts')
@@ -772,9 +841,11 @@ def main(argv=None):
         voltage.run(args)
     elif args.command == 'info':
         print(f'Settings: {SETTINGS_FILE}')
-        print(f'Mapping: {DEFAULT_PAD_MAP} ({len(load_pad_records())} pads)')
+        run_context(args, args.run_number)
+        print('Run configuration:', args.run_info)
+        print(f'Mapping: {args.pad_map} ({len(load_pad_records(args.pad_map))} connected pads)')
         print(f'ROOT input: {args.input_dir.resolve()}')
-        print(f'Veto ledger: {default_veto_file(args.input_dir)}')
+        print(f'Veto ledger: {default_veto_file(args.input_dir, args.run_number, args.run_info["setup"])}')
         database = cut_database(args.cuts_db)
         print(f'Cut DB: {database.path}')
         print(f'Event displays: {database.describe()}')

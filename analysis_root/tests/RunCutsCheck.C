@@ -19,10 +19,14 @@ void RunCutsCheck() {
     Check(PassHit({1,335,1,30,100},config,false,1615),"Event profile excludes large pads");
     Check(!PassHit({1,335,1,30,100},config,true,1615),"Voltage profile omitted");
     Check(!PassHit({1,10,1,30,-2},config,false,1616),"Negative threshold");
-    {std::ofstream f(path);f<<"[global]\nreject = FADC == 153\nreject = Pad == 24\n";}
+    {std::ofstream f(path);f<<"[global]\nreject = FADC == 153\nreject = Pad == 184\n";}
     Config aliases("","","",path.c_str());
     Check(!PassHit({1,152,1,30,100},aliases),"FADC conversion");
     Check(!PassHit({1,15,1,30,100},aliases),"Pad conversion");
+    {std::ofstream f(path);f<<"[global]\nreject = Pad == 0\n";}
+    Config largeOrigin("","","",path.c_str());
+    Check(!PassHit({1,504,1,30,100},largeOrigin),"Large Pad0 must reject fADC505");
+    Check(PassHit({1,152,1,30,100},largeOrigin),"Large Pad0 must not reject medium fADC153");
     {std::ofstream f(path);f<<"[run 1616]\nreject = Channel == 42 && Time == 20\n";}
     Config pulses("","","",path.c_str());RunData data;data.run=1616;
     data.hits={{1,42,1,20,100},{1,42,2,40,200}};data.events[1]={0,1};

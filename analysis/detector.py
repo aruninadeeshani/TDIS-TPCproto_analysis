@@ -26,6 +26,7 @@ DEFAULT_INPUT_DIR = PROJECT_DIR / 'data' / 'root'
 if not DEFAULT_INPUT_DIR.is_dir():
     DEFAULT_INPUT_DIR = PROJECT_DIR
 DEFAULT_PAD_MAP = AUXILIARY_DIR / 'pad_map.csv'
+SETUP_MAPS = {'large_medium': 'pad_map.csv', 'medium_small': 'pad_map_medium_small.csv'}
 SETTINGS_FILE = SCRIPT_DIR / 'settings.csv'
 DEFAULT_CUTS_DB = PROJECT_DIR / 'config' / 'run_cuts.ini'
 DEFAULT_VOLTAGE_STUDY_DB = PROJECT_DIR / 'config' / 'voltage_study_cuts.ini'
@@ -63,15 +64,31 @@ def results_directory(input_dir=DEFAULT_INPUT_DIR):
     return project / 'results' / 'python'
 
 
-def default_veto_file(input_dir=DEFAULT_INPUT_DIR):
+def default_veto_file(input_dir=DEFAULT_INPUT_DIR, run=None, setup='large_medium'):
     """Use a freshly generated run ledger when present, else the bundled copy.
 
     The CSV is indexed by (run,event), never by event number alone. Use an
     explicit --veto-file when working with unrelated data having reused run
     numbers. auxiliary/veto_provenance.json documents the bundled snapshot.
+    Adjacent run_summary.csv distinguishes processed zero-veto runs from
+    runs skipped by the voltage workflow; only the latter fall back.
     """
-    generated = results_directory(input_dir) / 'voltage' / 'rejected_events.csv'
-    if generated.exists():
+    root = results_directory(input_dir)
+    candidates = [root / 'voltage' / 'rejected_events.csv']
+    if setup != 'large_medium':
+        candidates.insert(0, root / 'setups' / setup / 'voltage' / 'rejected_events.csv')
+    for generated in candidates:
+        if not generated.exists():
+            continue
+        # A voltage scan skips runs without known voltages. Its new ledger
+        # must not erase those runs' established vetoes. A processed clean
+        # run still uses the live ledger even when it has zero rejected IDs.
+        summary = generated.with_name('run_summary.csv')
+        if run is not None and summary.exists():
+            with summary.open(newline='') as stream:
+                processed = {int(row['run']) for row in csv.DictReader(stream)}
+            if int(run) not in processed:
+                continue
         return generated
     # Accept the former layout when using a separate, older dataset.
     legacy = Path(input_dir) / 'time_voltage_plots' / 'rejected_events.csv'
@@ -102,7 +119,7 @@ def load_hit_arrays(root_filename, tree_name='ntuple',
     return arrays, root_file
 
 def rejected_events_for_run(run, path=None):
-    path = Path(path) if path else default_veto_file()
+    path = Path(path) if path else default_veto_file(run=run)
     if not path.exists():
         raise FileNotFoundError(f"Missing veto ledger: {path}. Generate it with tpc.py voltage or pass --veto-file.")
     with path.open(newline='') as stream:
@@ -152,6 +169,7 @@ class CutDatabase:
         self.path = Path(path).resolve()
         self.text = self.path.read_text()
         self.rules = []
+        self.metadata = {}
         section = None
         sections = set()
         for line_number, original in enumerate(self.text.splitlines(), 1):
@@ -172,9 +190,27 @@ class CutDatabase:
                     continue
                 if section is None:
                     raise ValueError('Put rules inside a named block')
+                setting = re.fullmatch(r'(setup|drift_voltage_v|tilt_angle_deg)\s*=\s*(.*)', code, re.I)
+                if setting:
+                    key, value = setting[1].lower(), setting[2].strip()
+                    block = self.metadata.setdefault(section, {})
+                    if key in block:
+                        raise ValueError(f'Duplicate metadata key {key}')
+                    if key == 'setup':
+                        value = value.lower()
+                        if value not in SETUP_MAPS:
+                            raise ValueError(f'Unknown setup {value!r}; choose '+', '.join(SETUP_MAPS))
+                    else:
+                        if value and not re.fullmatch(_NUMBER, value):
+                            raise ValueError(f'{key} must be numeric, or blank for unknown')
+                        value = float(value) if value else None
+                        if value is not None and not math.isfinite(value):
+                            raise ValueError(f'{key} must be finite, or blank for unknown')
+                    block[key] = value
+                    continue
                 match = re.fullmatch(r'reject\s*=\s*(.+)', code, re.I)
                 if not match:
-                    raise ValueError('Expected reject = CONDITION')
+                    raise ValueError('Expected reject = CONDITION, setup, drift_voltage_v or tilt_angle_deg')
                 conditions = tuple(self._condition(term.strip()) for term in match[1].split('&&'))
                 self.rules.append(CutRule(section, match[1].strip(), conditions, line_number, note.strip()))
             except ValueError as error:
@@ -212,7 +248,24 @@ class CutDatabase:
     def describe(self, run=None):
         return ' && '.join(f'NOT({r.expression})' for r in self.active(run)) or 'all rows'
 
-    def keep(self, arrays, run=None, pad_map=DEFAULT_PAD_MAP):
+    def run_info(self, run=None, setup=None):
+        """Run configuration inherits global -> run; an explicit setup wins.
+
+        Voltage supplies the study assignment. Neither numeric field cuts hits,
+        calibrates Time, or rotates coordinates.
+        Blank numeric values mean unknown (and can clear an inherited value).
+        """
+        info = dict(setup='large_medium', drift_voltage_v=None, tilt_angle_deg=None)
+        info.update(self.metadata.get('global', {}))
+        if run is not None:
+            info.update(self.metadata.get(f'run {int(run)}', {}))
+        if setup is not None:
+            if setup not in SETUP_MAPS:
+                raise ValueError(f'Unknown setup: {setup}')
+            info['setup'] = setup
+        return dict(run=run, **info)
+
+    def keep(self, arrays, run=None, pad_map=None):
         """Return one bool/raw row; never aggregate pulses or expand event IDs."""
         fields = {name: np.asarray(values) for name, values in arrays.items()}
         size = len(next(iter(fields.values())))
@@ -223,8 +276,8 @@ class CutDatabase:
                 name = condition.field
                 if name not in fields and name == 'FADC' and 'Channel' in fields:
                     fields[name] = fields['Channel'] + 1
-                if name not in fields and name == 'Pad' and 'Channel' in fields:
-                    fields[name] = channel_to_pad(fields['Channel'], pad_map)
+                if name == 'Pad' and 'Channel' in fields:
+                    fields[name] = channel_to_pad(fields['Channel'], resolve_pad_map(self, run, pad_map=pad_map))
                 if name not in fields:
                     raise ValueError(f'{self.path}:{rule.line}: branch {name} is missing from this input')
                 bad &= condition.matches(fields[name])
@@ -261,7 +314,7 @@ def passes_hit_cuts(channel, time):
 
 
 def select_hit_mask(events, channels, times, rejected_events=(), voltage=False,
-                    run=None, cuts_db=None, arrays=None, pad_map=DEFAULT_PAD_MAP,
+                    run=None, cuts_db=None, arrays=None, pad_map=None,
                     study_cuts_db=None):
     """Preserve ALL passing raw pulses; combine detector DB and run auto vetoes.
 
@@ -270,6 +323,7 @@ def select_hit_mask(events, channels, times, rejected_events=(), voltage=False,
     """
     fields = dict(arrays or {})
     fields.update(Event=np.asarray(events), Channel=np.asarray(channels), Time=np.asarray(times))
+    pad_map = resolve_pad_map(cuts_db, run, pad_map=pad_map)
     mask = cut_database(cuts_db).keep(fields, run, pad_map=pad_map)
     # Only the independent voltage workflow opts into this second DB.
     # Ordinary cleaning never opens the study file, even if it is missing.
@@ -280,7 +334,7 @@ def select_hit_mask(events, channels, times, rejected_events=(), voltage=False,
 
 
 def select_event_hits(events, channels, times, charges, target_event, rejected_events=(),
-                      run=None, cuts_db=None, arrays=None, pad_map=DEFAULT_PAD_MAP,
+                      run=None, cuts_db=None, arrays=None, pad_map=None,
                       accepted_mask=None):
     """First passing hit/channel for DISPLAY only, after DB cuts and event vetoes.
 
@@ -320,15 +374,78 @@ def load_pad_records(csv_path=DEFAULT_PAD_MAP):
             r[key] = int(r[key])
         for key in ("X_mm", "Y_mm", "Width_mm", "Height_mm"):
             r[key] = float(r[key])
-    if sorted(r['Pad'] for r in records) != list(range(410)):
-        raise ValueError("Expected exactly 410 continuous pad numbers, 0–409")
+    if not records or sorted(r['Pad'] for r in records) != list(range(len(records))):
+        raise ValueError("Expected nonempty continuous pad numbers starting at 0")
     if len({r['Channel'] for r in records}) != len(records):
         raise ValueError("Each electronics channel must map to only one pad")
+    positions = set()
+    for r in records:
+        bounds = [r[k] for k in ('X_mm', 'Y_mm', 'Width_mm', 'Height_mm')]
+        position = (r['PadSize'], r['Row'], r['Col'])
+        if (r['Channel'] < 0 or r['FADC'] != r['Channel'] + 1 or
+            not all(math.isfinite(v) for v in bounds) or min(bounds[2:]) <= 0 or
+            min(bounds[:2]) < 0 or position in positions):
+            raise ValueError(f'Invalid/duplicate pad geometry: {r}')
+        positions.add(position)
     return sorted(records, key=lambda r: r['Pad'])
+
+def resolve_pad_map(database=None, run=None, setup=None, pad_map=None):
+    """Explicit CSV > setup override > run DB > global DB > large_medium.
+
+    Even uncut raw plots resolve metadata: mapping selection is not a cut.
+    """
+    if pad_map is not None:
+        return Path(pad_map).resolve()
+    name = cut_database(database).run_info(run, setup)['setup']
+    return AUXILIARY_DIR / SETUP_MAPS[name]
+
+
+def scan_run_contexts(source, database, setup=None, pad_map=None):
+    """Discover files and their DB voltages, without ROOT or a second table.
+
+    Unknown voltages are distinct from zero. Explicit blank run values clear
+    a global default. Setup overrides only affect geometry, never voltage.
+    """
+    source, database = Path(source), cut_database(database)
+    inputs = {int(path.stem[6:]): path for path in source.glob('ntuple*.root')
+              if path.stem[6:].isdigit() and path.is_file()}
+    contexts, metadata, skipped = {}, {}, []
+    for run, path in sorted(inputs.items()):
+        info = database.run_info(run=run, setup=setup)
+        metadata[str(run)] = info
+        if info['drift_voltage_v'] is None:
+            reason = f'unknown drift_voltage_v in {database.path}; set it in [global] or [run {run}]'
+            skipped.append(dict(run=run, reason=reason))
+            print(f'Run {run}: skipped ({reason})', flush=True)
+            continue
+        contexts[run] = dict(info=info, input_path=path,
+                             path=resolve_pad_map(database, run=run, setup=setup, pad_map=pad_map))
+    return contexts, metadata, skipped
+
+
+class PadGeometry(dict):
+    """Channel lookup plus CSV geometry. Only connected pads receive IDs.
+
+    Blank physical small pads retain their grid positions but are not bins,
+    measured zeroes, or synthetic readout channels.
+    """
+    def __init__(self, csv_path=DEFAULT_PAD_MAP):
+        self.path = Path(csv_path)
+        self.records = load_pad_records(csv_path)
+        super().__init__((r['Channel'], (r['PadSize'], r['Row'], r['Col'])) for r in self.records)
+        self.width = max(r['X_mm'] + r['Width_mm'] for r in self.records)
+        self.height = max(r['Y_mm'] + r['Height_mm'] for r in self.records)
+        self.blanks = []
+        if any(r['PadSize'] == 'Small' for r in self.records):
+            occupied = {(r['Row'], r['Col']) for r in self.records if r['PadSize'] == 'Small'}
+            for row in range(10):
+                for col in range(50):
+                    if (row, col) not in occupied:
+                        self.blanks.append((col * 2., 40. + row * 2., 2., 2.))
 
 def load_pad_map(csv_path=DEFAULT_PAD_MAP):
     """ROOT Channel -> (section, bottom-based row, column)."""
-    return {r['Channel']: (r['PadSize'], r['Row'], r['Col']) for r in load_pad_records(csv_path)}
+    return PadGeometry(csv_path)
 
 def channel_to_pad(channels, csv_path=DEFAULT_PAD_MAP):
     """Vectorized lookup of zero-based ROOT channels; -1 for unmapped values."""
@@ -342,20 +459,34 @@ def channel_to_pad(channels, csv_path=DEFAULT_PAD_MAP):
     pads[valid] = lookup[values[valid].astype(int)]
     return pads
 
-def pad_number(pad_size, row, col):
+def pad_number(pad_size, row, col, csv_path=None):
+    """Left to right, then upward: Large 0–159, then Medium 160–409.
+
+    Without csv_path this is the historical large_medium helper. Supply the
+    selected CSV for any other setup; blank positions return -1.
+    """
+    if csv_path is not None:
+        return next((r['Pad'] for r in load_pad_records(csv_path)
+                     if (r['PadSize'], r['Row'], r['Col']) == (pad_size, row, col)), -1)
     if pad_size == "Medium":
-        return row * MED_COLS + col
+        return LG_ROWS * LG_COLS + row * MED_COLS + col
     if pad_size == "Large":
-        return 250 + row * LG_COLS + col
+        return row * LG_COLS + col
     raise ValueError(f"Unknown pad size: {pad_size}")
 
-def pad_rect_mm(pad_size, row, col):
-    # Detector coordinates: origin at lower-left medium pad, x to the
+def pad_rect_mm(pad_size, row, col, csv_path=None):
+    """Footprint from a selected CSV, or large_medium when omitted."""
+    if csv_path is not None:
+        for r in load_pad_records(csv_path):
+            if (r['PadSize'], r['Row'], r['Col']) == (pad_size, row, col):
+                return tuple(r[k] for k in ('X_mm', 'Y_mm', 'Width_mm', 'Height_mm'))
+        raise ValueError('No connected pad at this section/row/column')
+    # Detector coordinates: origin at lower-left large pad (fADC505), x to the
     # right, y upward. This is a pad footprint, NOT a 3D track coordinate.
     if pad_size == "Medium":
-        return col * MED_PAD_MM, row * MED_PAD_MM, MED_PAD_MM, MED_PAD_MM
+        return col * MED_PAD_MM, LG_ROWS * LG_PAD_MM + row * MED_PAD_MM, MED_PAD_MM, MED_PAD_MM
     if pad_size == "Large":
-        return col * LG_PAD_MM, 40 + row * LG_PAD_MM, LG_PAD_MM, LG_PAD_MM
+        return col * LG_PAD_MM, row * LG_PAD_MM, LG_PAD_MM, LG_PAD_MM
     raise ValueError(f"Unknown pad size: {pad_size}")
 
 # ---- Whole-event noise analysis, before any hit cuts ----
@@ -367,9 +498,13 @@ def module_floods(event, channel, time, pairs, min_channels, min_synchronous):
     The returned dictionary retains evidence for each (event,module).
     Electronics modules are not the physical pad rows in the wiring map.
     """
-    groups, occupancy = np.unique(pairs[:, 0].astype(np.int64) * READOUT_MODULES + pairs[:, 1] // CHANNELS_PER_MODULE,
+    # Include observed high channel numbers. A fixed eight-module stride
+    # would alias (event N,module8) with (event N+1,module0).
+    max_channel = max(int(np.max(channel, initial=-1)), int(np.max(pairs[:, 1], initial=-1)))
+    module_stride = max(READOUT_MODULES, max_channel // CHANNELS_PER_MODULE + 1)
+    groups, occupancy = np.unique(pairs[:, 0].astype(np.int64) * module_stride + pairs[:, 1] // CHANNELS_PER_MODULE,
                                   return_counts=True)
-    row_groups = event.astype(np.int64) * READOUT_MODULES + channel // CHANNELS_PER_MODULE
+    row_groups = event.astype(np.int64) * module_stride + channel // CHANNELS_PER_MODULE
     keys, rows = np.unique(row_groups, return_counts=True)
     details = {}
     for key, nch in zip(groups[occupancy >= min_channels], occupancy[occupancy >= min_channels]):
@@ -380,7 +515,7 @@ def module_floods(event, channel, time, pairs, min_channels, min_synchronous):
         nrows = int(rows[np.searchsorted(keys, key)])
         nsync = int(synchronous.max())
         if nsync >= min_synchronous or nrows >= MODULE_HITS_PER_CHANNEL * nch:
-            ev, module = divmod(int(key), READOUT_MODULES)
+            ev, module = divmod(int(key), module_stride)
             details.setdefault(ev, []).append(dict(module=module, channels=int(nch),
                                                    hits=nrows, synchronous_channels=nsync))
     return details
@@ -401,7 +536,7 @@ def plot_config_rows(path):
 
 
 def raw_histogram_spec(values, branch, bins=None, bin_width=None, limits=None, log_y=None,
-                       binning_file=DEFAULT_BINNING, overrides=None):
+                       binning_file=DEFAULT_BINNING, overrides=None, pad_count=410, channel_count=None):
     """Return explicit bin EDGES and scale. All histogram upper edges are exclusive.
 
     Default integer fields use one native value per bin. Channel includes
@@ -424,8 +559,11 @@ def raw_histogram_spec(values, branch, bins=None, bin_width=None, limits=None, l
     high = float(finite.max()) if finite.size else 0.
     if branch in ('Event', 'Channel', 'Hit', 'Time', 'Blockhead', 'FADC', 'Pad'):
         low = min(0., low)
+    if branch == 'Pad':
+        low, high = 0., float(pad_count - 1)
     if branch == 'Channel':
-        high = max(high, CHANNELS_PER_MODULE * READOUT_MODULES - 1)
+        high = max(high, CHANNELS_PER_MODULE * READOUT_MODULES - 1,
+                   (channel_count or 0) - 1)
     low, high = math.floor(low) - .5, math.ceil(high) + .5
     if row.get('Min', '').strip(): low = float(row['Min'])
     if row.get('Max', '').strip(): high = float(row['Max'])
@@ -481,7 +619,7 @@ def load_2d_plots(path=DEFAULT_2D_PLOTS):
     return plots
 
 
-def raw_2d_axes(arrays, plot, binning_file=DEFAULT_BINNING):
+def raw_2d_axes(arrays, plot, binning_file=DEFAULT_BINNING, pad_count=410, channel_count=None):
     """Uniform ROOT-compatible edges, always derived from the uncut input.
 
     Min/Max change plotting limits only. The ROOT histograms keep all flow
@@ -493,7 +631,8 @@ def raw_2d_axes(arrays, plot, binning_file=DEFAULT_BINNING):
         if field not in arrays:
             raise ValueError(f'{plot["Name"]}: missing branch {field}')
         options = {key: plot.get(axis + key, '') for key in ('BinWidth', 'Bins', 'Min', 'Max')}
-        edges, _ = raw_histogram_spec(arrays[field], field, binning_file=binning_file, overrides=options)
+        edges, _ = raw_histogram_spec(arrays[field], field, binning_file=binning_file,
+                                     overrides=options, pad_count=pad_count, channel_count=channel_count)
         axes.append(edges)
     if (len(axes[0]) + 1) * (len(axes[1]) + 1) > 4_000_000:
         raise ValueError(f'{plot["Name"]}: more than 4 million 2D cells; increase BinWidth or narrow limits in raw_2d_plots.csv')

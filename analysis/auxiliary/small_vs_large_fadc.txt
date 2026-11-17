@@ -1,0 +1,8 @@
+SMALL vs LARGE fADC comparison
+Largest Large fADC576 (Large Pad145, ROOT Channel575).
+256 connected Small pads:159 share a Large-pad fADC;97 do not.
+No Large-pad counterpart: 288-296, 313-335, 344-359, 432-439, 456-480, 489-504
+Expert-confirmed577/579 are disconnected and shown as a central gap, not counted among connected Small pads.
+No connected Small label exceeds the Large maximum. Large fADC576 is absent from Small.
+Orange: no connected Large-pad counterpart. Green: matching connected Large fADC. White: unconnected.
+All numeric pad/fADC labels enlarged by2pt and measured to fit their boxes.

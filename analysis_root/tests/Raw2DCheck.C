@@ -47,7 +47,11 @@ void Raw2DCheck() {
         Check(charge->GetBinContent(5,5)==1,"Both-axis overflow corner lost");
         Check(charge->GetBinContent(4,5)==(cleaned?0:1),"Exact upper Time edge was included");
         Check(charge->Integral()==3,"Wrong visible charge/time count");
-        if(cleaned)Check(pad->Integral(1,1,0,3)==0,"Electronics exclusion did not reach mapped Pad0");
+        // Channel152 is medium Pad160 after the section rearrangement.
+        // Check raw occupancy too, so the cleaned assertion cannot pass on an empty bin.
+        int mappedBin=pad->GetXaxis()->FindBin(160);
+        Check(pad->Integral(mappedBin,mappedBin,0,3)==(cleaned?0:2),
+              "Electronics exclusion did not reach mapped Pad160");
         std::string stem="TPC_raw2d_999001"+std::string(cleaned?"_clean":"");
         Check(file.Get(stem.c_str()) && file.Get((stem+"_Event_vs_Pad").c_str()) && file.Get((stem+"_Time_vs_Charge").c_str()),"Missing summary/individual canvases");
         file.Close();

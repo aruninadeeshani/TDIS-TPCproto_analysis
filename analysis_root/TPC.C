@@ -9,7 +9,8 @@
 //   root -l -b -q 'analysis_root/TPC.C("check")'
 // For compilation, use TPC.C+(...) instead of TPC.C(...).
 // Optional arguments after event: inputDirectory, outputDirectory, vetoCSV,
-// cutsDB, studyCutsDB. General cleaning lives in config/run_cuts.ini;
+// cutsDB, studyCutsDB, setup. Empty setup inherits the detector DB.
+// General cleaning lives in config/run_cuts.ini;
 // the independent voltage study adds config/voltage_study_cuts.ini.
 // Edit drawing functions here for plot styles;
 // TPCDetector.h isolates raw hits, mapping, selection and noise algorithms.
@@ -27,8 +28,8 @@
 //     which function each menu/command invokes).
 //
 // DATA CONVENTIONS TO KEEP IN MIND
-//   ROOT Channel starts at 0; printed fADC = Channel + 1; Pad runs 0..409.
-//   Medium pads 0..249 are below large pads 250..409.
+//   ROOT Channel starts at 0; printed fADC = Channel + 1. Pad IDs/count
+//   come from the run's setup map. Default large_medium retains Pad0=fADC505.
 //   Event displays keep the first passing hit/channel and include both sizes.
 //   Voltage histograms count ALL accepted pulses and add the voltage-only
 //   Channel limit. Their normalization is by accepted HITS, not events.
@@ -116,6 +117,44 @@ namespace PersonalTPC {
         canvas->SaveAs((stem.string() + ".pdf").c_str());
     }
 
+    inline std::string MetadataNumber(double value) {
+        std::ostringstream out;out<<std::setprecision(17)<<value;return out.str();
+    }
+    inline std::string MetadataNumber(const std::optional<double>& value) {
+        return value?MetadataNumber(*value):"";
+    }
+    inline std::string RunDescription(const Config& config,int run) {
+        const auto& info=config.Info(run);
+        std::string text=info.setup;
+        if(info.driftVoltageV)text+=" | drift "+MetadataNumber(info.driftVoltageV)+" V";
+        if(info.tiltAngleDeg)text+=" | tilt "+MetadataNumber(info.tiltAngleDeg)+" deg";
+        return text;
+    }
+    inline std::string RunAnnotation(const Config& config,int run) {
+        const auto& info=config.Info(run);
+        return info.setup=="large_medium" && config.setupOverride.empty() && !info.driftVoltageV && !info.tiltAngleDeg
+            ?"":" | "+RunDescription(config,run);
+    }
+    // Sidecars preserve the actual selected map and resolved run configuration
+    // even for UNCUT exports. Numeric blanks mean unknown; metadata adds no cuts.
+    // A prefix permits multiple run snapshots beside comparison exports.
+    inline void ExportRunInfo(const Config& config,int run,const fs::path& out,const std::string& prefix="") {
+        const auto& info=config.Info(run);const auto& geometry=config.Mapping(run);
+        fs::create_directories(out);
+        geometry.Snapshot(out/(prefix+"pad_map_used.csv"));
+        std::ofstream csv(out/(prefix+"run_info.csv"));
+        csv<<"run,setup,drift_voltage_v,tilt_angle_deg,mapping_file,connected_pads,board_width_mm,board_height_mm,unconnected_small_tiles,setup_override\n"
+           <<run<<','<<info.setup<<','<<MetadataNumber(info.driftVoltageV)<<','<<MetadataNumber(info.tiltAngleDeg)<<','
+           <<QuoteCSV(geometry.path.string())<<','<<geometry.pads.size()<<','<<geometry.width<<','<<geometry.height<<','
+           <<geometry.blankTiles.size()<<','<<config.setupOverride<<'\n';
+        TNamed((prefix+"setup").c_str(),info.setup.c_str()).Write();
+        TNamed((prefix+"drift_voltage_v").c_str(),MetadataNumber(info.driftVoltageV).c_str()).Write();
+        TNamed((prefix+"tilt_angle_deg").c_str(),MetadataNumber(info.tiltAngleDeg).c_str()).Write();
+        TNamed((prefix+"mapping_file").c_str(),geometry.path.c_str()).Write();
+        TNamed((prefix+"mapping_csv").c_str(),geometry.text.c_str()).Write();
+        TNamed((prefix+"setup_override").c_str(),config.setupOverride.c_str()).Write();
+    }
+
     // Convert selected hits into one value per PAD for drawing:
     // charge=true uses Charge; false uses Time. The selection/first-hit
     // decision has already been made by DisplayHits() in TPCDetector.h.
@@ -160,6 +199,10 @@ namespace PersonalTPC {
             h->SetMinimum(0);
             h->SetMaximum(maximum);
             h->Draw("COLZ");
+            for(const auto& tile:geometry.blankTiles) {
+                TBox blank(tile.x,tile.y,tile.x+tile.width,tile.y+tile.height);
+                blank.SetFillColor(kWhite);blank.SetLineColor(kGray+1);blank.DrawClone();
+            }
             for (const auto& pad : geometry.pads) {
                 TBox border(pad.x, pad.y, pad.x + pad.width, pad.y + pad.height);
                 border.SetFillStyle(0);
@@ -208,14 +251,14 @@ namespace PersonalTPC {
     // Open/update a Charge canvas and a Time canvas for the SAME selected
     // event. Explicit mode names keep 2D and 3D windows/exports separate.
     inline std::vector<TCanvas*> EventCanvases(int run, int event, const std::vector<Hit>& hits, const Geometry& geometry,
-        bool threeD) {
+        bool threeD,const std::string& annotation="") {
         std::vector<TCanvas*> result;
         for (bool charge : { true, false }) {
             std::string kind = charge ? "charge" : "time", mode = threeD ? "3d" : "2d";
             auto c = Canvas("TPC_" + kind + "_run" + std::to_string(run) + "_" + mode, "TPC event");
             c->cd();
             DrawPhysical(geometry, Values(hits, geometry, charge), kind + " - Run " + std::to_string(run) + " - Event "
-                + std::to_string(event), threeD);
+                + std::to_string(event)+annotation, threeD);
             result.push_back(c);
         }
         return result;
@@ -240,7 +283,8 @@ namespace PersonalTPC {
     // Workflow: read a run -> load its vetoes -> select one event -> export.
     // event<0 means choose the first event with accepted mapped hits.
     // This function writes only under the configured OUTPUT directory.
-    inline std::vector<Hit> SaveEvent(const Config& config, const Geometry& geometry, int run, int event) {
+    inline std::vector<Hit> SaveEvent(const Config& config, const Geometry&, int run, int event) {
+        const auto& geometry=config.Mapping(run);
 
         // Raw data is read-only. Cuts/vetoes and first-hit-per-channel reduction
         // are applied by DisplayHits(), not by changing the input tree.
@@ -255,7 +299,7 @@ namespace PersonalTPC {
                 }
         auto hits = DisplayHits(data, event, config, geometry, vetoes);
         if (hits.empty()) throw std::runtime_error("Requested event is vetoed, absent, or has no selected mapped hits");
-        auto out = config.output / "events" / ("run" + std::to_string(run));
+        auto out = config.OutputForRun(run) / "events" / ("run" + std::to_string(run));
         fs::create_directories(out);
         std::string tag = "event_" + std::to_string(run) + "_" + std::to_string(event);
 
@@ -263,6 +307,7 @@ namespace PersonalTPC {
         // folder. The original ntupleNNNN.root is never opened for writing.
         auto rootPath = out / (tag + ".root");
         TFile file(rootPath.c_str(), "RECREATE");
+        ExportRunInfo(config,run,out,tag+"_");
         TNamed("selection", config.CutText(false, run).c_str()).Write();
         TNamed("cuts_db", config.cutDBPath.c_str()).Write();
         config.Cuts().Snapshot(out / (tag + "_cuts.ini"));
@@ -307,7 +352,7 @@ namespace PersonalTPC {
         // Always save both 2D and 3D views, each for Charge and Time. The same
         // selected hits feed all four views; drawing mode does not change cuts.
         for (bool threeD : { false, true }) {
-            auto canvases = EventCanvases(run, event, hits, geometry, threeD);
+            auto canvases = EventCanvases(run, event, hits, geometry, threeD,RunAnnotation(config,run));
             for (size_t i = 0; i < canvases.size(); ++i) {
                 std::string kind = i == 0 ? "charge" : "time";
                 auto directory = threeD ? out / "3d" : out;
@@ -320,10 +365,11 @@ namespace PersonalTPC {
         csv << "run,event,pad,fadc,root_channel,charge,time,hit,x_mm,y_mm,width_mm,height_mm\n";
         WriteHitCSV(csv, run, hits, geometry);
         file.Close();
-        int large = 0;
-        for (const auto& h : hits) large += geometry.Number(h.channel) >= 250;
-        std::cout << "Run " << run << ", event " << event << ": " << hits.size() - large << " medium and "
-            << large << " large pads. Saved in " << out << std::endl;
+        std::map<std::string,int> sections;
+        for(const auto& h:hits)++sections[geometry.pads.at(geometry.Number(h.channel)).section];
+        std::cout<<"Run "<<run<<", event "<<event<<" ("<<RunDescription(config,run)<<"):";
+        for(const auto& item:sections)std::cout<<' '<<item.second<<' '<<item.first<<" pads;";
+        std::cout<<" saved in "<<out<<std::endl;
         return hits;
     }
 
@@ -354,7 +400,8 @@ namespace PersonalTPC {
     // Build a list of eligible event IDs once, then move within that list.
     // Enter/p/jump cannot land on a noise-vetoed or empty event. Pressing s
     // invokes SaveEvent(), so interactive and batch exports use one policy.
-    inline void Browse(const Config& config, const Geometry& geometry, int run, int event, bool threeD = false) {
+    inline void Browse(const Config& config, const Geometry&, int run, int event, bool threeD = false) {
+        const auto& geometry=config.Mapping(run);
         if (gROOT->IsBatch()) throw std::runtime_error("Use save in batch mode; event browsing needs interactive ROOT");
         auto data = ReadRun(run, config);
         ValidateCuts(data, config);
@@ -372,7 +419,7 @@ namespace PersonalTPC {
         }
         while (true) {
             auto hits = DisplayHits(data, accepted[position], config, geometry, vetoes);
-            EventCanvases(run, accepted[position], hits, geometry, threeD);
+            EventCanvases(run, accepted[position], hits, geometry, threeD,RunAnnotation(config,run));
             std::cout << "Event " << accepted[position] << " (" << position + 1 << '/' << accepted.size() << "): "
                 << hits.size() << " pads. Enter=next, p=previous, event number=jump, s=save, q=quit: " << std::flush;
             auto line = ReadLineWithGUI();
@@ -404,24 +451,29 @@ namespace PersonalTPC {
     // selection: run1615/event42535 and run1616/event5584. Change the two
     // SaveEvent calls and the corresponding titles/filenames together if
     // you want a different reference pair.
-    inline void Examples(const Config& config, const Geometry& geometry) {
-        auto first = SaveEvent(config, geometry, 1615, 42535), second = SaveEvent(config, geometry, 1616, 5584);
+    inline void Examples(const Config& config) {
+        const auto& firstMap=config.Mapping(1615);const auto& secondMap=config.Mapping(1616);
+        auto first = SaveEvent(config, firstMap, 1615, 42535), second = SaveEvent(config, secondMap, 1616, 5584);
         auto c = Canvas("TPC_examples", "Examples: 1615 and 1616", 1700, 1400);
         c->Divide(2, 2);
         c->cd(1);
-        DrawPhysical(geometry, Values(first, geometry, true), "Run 1615, event 42535: Charge");
+        DrawPhysical(firstMap, Values(first, firstMap, true), "Run 1615, event 42535: Charge"+RunAnnotation(config,1615));
         c->cd(2);
-        DrawPhysical(geometry, Values(first, geometry, false), "Run 1615, event 42535: Time");
+        DrawPhysical(firstMap, Values(first, firstMap, false), "Run 1615, event 42535: Time"+RunAnnotation(config,1615));
         c->cd(3);
-        DrawPhysical(geometry, Values(second, geometry, true), "Run 1616, event 5584: Charge");
+        DrawPhysical(secondMap, Values(second, secondMap, true), "Run 1616, event 5584: Charge"+RunAnnotation(config,1616));
         c->cd(4);
-        DrawPhysical(geometry, Values(second, geometry, false), "Run 1616, event 5584: Time");
-        auto directory = config.output / "comparisons";
+        DrawPhysical(secondMap, Values(second, secondMap, false), "Run 1616, event 5584: Time"+RunAnnotation(config,1616));
+        auto directory = config.OutputForRuns({1615,1616}) / "comparisons";
         SaveCanvas(c, directory / "examples_1615_1616");
         std::ofstream csv(directory / "example_hits_1615_1616.csv");
         csv << "run,event,pad,fadc,root_channel,charge,time,hit,x_mm,y_mm,width_mm,height_mm\n";
-        WriteHitCSV(csv, 1615, first, geometry);
-        WriteHitCSV(csv, 1616, second, geometry);
+        WriteHitCSV(csv, 1615, first, firstMap);
+        WriteHitCSV(csv, 1616, second, secondMap);
+        // Keep both run identities and maps beside the comparison canvas.
+        TFile file((directory/"examples_1615_1616.root").c_str(),"RECREATE");
+        ExportRunInfo(config,1615,directory,"run1615_");ExportRunInfo(config,1616,directory,"run1616_");
+        c->Write();file.Close();
         config.Cuts().Snapshot(directory / "examples_1615_1616_cuts.ini");
     }
 
@@ -442,7 +494,9 @@ namespace PersonalTPC {
     // pad/timePad: only mapped hits. occupancy: all events before hit cuts.
     // previous: detector-wide veto only, retained for the historical audit.
     struct Summary {
-        int run = 0, voltage = -1;
+        int run = 0;
+        double voltage = 0;
+        std::string setup,annotation;
         long long totalEvents = 0, acceptedEvents = 0, totalHits = 0, baseHits = 0, acceptedHits = 0, mappedHits = 0;
         bool selected = false;
         std::vector<NoiseInfo> vetoes;
@@ -456,12 +510,14 @@ namespace PersonalTPC {
     //   2) PassHit(..., true) applies the voltage-specific hit cuts.
     //   3) Reject the whole event if either noise criterion flagged it.
     //   4) Fill spectra once per accepted RAW pulse, without deduplication.
-    inline Summary Analyze(int run, int voltage, const Config& config, const Geometry& geometry) {
+    inline Summary Analyze(int run, double voltage, const Config& config, const Geometry&) {
+        const auto& geometry=config.Mapping(run);
         auto data = ReadRun(run, config);
         ValidateCuts(data, config, true);
         Summary s;
         s.run = run;
         s.voltage = voltage;
+        s.setup=geometry.setup;s.annotation=RunAnnotation(config,run);
         s.totalEvents = data.events.size();
         s.totalHits = data.hits.size();
         auto tag = "run" + std::to_string(run);
@@ -471,13 +527,14 @@ namespace PersonalTPC {
         s.time = std::make_shared<TH1D>(("time_" + tag).c_str(), ";Time (native branch units);Accepted hits", config.timeMax,
             -.5, config.timeMax - .5);
         s.previous = std::make_shared<TH1D>(("previous_" + tag).c_str(), "", config.timeMax, -.5, config.timeMax - .5);
-        s.pad = std::make_shared<TH1D>(("pad_" + tag).c_str(), ";Pad number (0-based);Accepted hits", 410, -.5,
-            409.5);
-        int channels = config.readoutModules * config.channelsPerModule;
+        s.pad = std::make_shared<TH1D>(("pad_" + tag).c_str(), ";Pad number (0-based);Accepted hits", geometry.pads.size(), -.5,
+            geometry.pads.size()-.5);
+        int channels = config.EffectiveChannels(run);
+        for(const auto& hit:data.hits)channels=std::max(channels,hit.channel+1);
         s.occupancy = std::make_shared<TH1D>(("occupancy_" + tag).c_str(), ";Distinct channels/event;Events", channels
             + 1, -.5, channels + .5);
         s.timePad = std::make_shared<TH2D>(("time_pad_" + tag).c_str(), ";Pad number (0-based);Time (native units)",
-            410, -.5, 409.5, config.timeMax, -.5, config.timeMax - .5);
+            geometry.pads.size(), -.5, geometry.pads.size()-.5, config.timeMax, -.5, config.timeMax - .5);
 
         // Detach all numerical histograms from the current file/directory.
         // Their shared_ptr owners keep them alive until the scan is exported.
@@ -534,8 +591,8 @@ namespace PersonalTPC {
     // Legend event totals are distinct Event values before cuts, not the
     // number of histogram entries. The spectra themselves count raw hits.
     inline std::string Label(const Summary& s) {
-        return std::to_string(s.voltage) + " V | run " + std::to_string(s.run) + " | " + std::to_string(s.totalEvents)
-            + " events";
+        return MetadataNumber(s.voltage) + " V | run " + std::to_string(s.run) + " | " + std::to_string(s.totalEvents)
+            + " events"+s.annotation;
     }
 
     // normalized=false: compare raw hit counts/exposure.
@@ -543,6 +600,10 @@ namespace PersonalTPC {
     // pads=false uses Time; true uses continuous pad-number occupancy.
     inline TCanvas* Overlay(const std::vector<Summary>& summaries, const std::string& name, bool normalized, bool pads,
         const Config& config) {
+        if(pads) {
+            std::set<std::string> setups;for(const auto& s:summaries)if(s.selected)setups.insert(s.setup);
+            if(setups.size()>1)throw std::runtime_error("Pad overlays require one setup; separate the runs by setup");
+        }
         auto c = Canvas("TPC_" + name, name, 1400, 800);
         c->cd();
         c->SetRightMargin(.34);
@@ -700,45 +761,63 @@ namespace PersonalTPC {
     // This command recomputes noise evidence from raw data; it does NOT
     // merely reuse the bundled veto list. Its exported rejected_events.csv
     // becomes the preferred ledger for later event browsing/saving.
-    inline void Voltage(const Config& config, const Geometry& geometry) {
-        // Edit YOUR copy of the run/voltage table in analysis_root/auxiliary/.
-        // Conflicting voltage assignments for one run are excluded, never guessed.
-
-        // 8.1 Read run/voltage assignments from your auxiliary table. One run
-        // may not have two different voltages; such conflicts get voltage=-1.
-        std::ifstream table(config.Auxiliary("datafiles-voltage.txt"));
-        if (!table) throw std::runtime_error("Missing voltage table");
-        std::map<int, std::set<int>> assignments;
-        std::string line;
-        while (std::getline(table, line)) {
-            line = line.substr(0, line.find('#'));
-            std::stringstream ss(line);
-            int run, v;
-            if (ss >> run >> v) assignments[run].insert(v);
+    // Available inputs determine scan membership; the detector DB alone
+    // supplies signed, finite voltages, with global/run inheritance. Unknown
+    // runs are skipped before reading a tree or requiring a setup mapping.
+    inline std::map<int,double> ReadVoltages(const Config& config,std::ostream& diagnostics=std::cout) {
+        if(!fs::is_directory(config.input))throw std::runtime_error("Missing input directory: "+config.input.string());
+        std::set<int> runs;
+        const std::regex pattern(R"(ntuple([0-9]+)\.root)");
+        for(const auto& entry:fs::directory_iterator(config.input)) {
+            std::smatch match;auto filename=entry.path().filename().string();
+            if(!entry.is_regular_file() || !std::regex_match(filename,match,pattern))continue;
+            try {
+                int run=std::stoi(match[1]);
+                if(filename=="ntuple"+std::to_string(run)+".root")runs.insert(run);
+            } catch(const std::out_of_range&) {
+                diagnostics<<"Skipping input with out-of-range run number: "<<filename<<'\n';
+            }
         }
+        std::map<int,double> voltages;
+        for(int run:runs) {
+            auto value=config.Cuts().Info(run).driftVoltageV;
+            if(value)voltages[run]=*value;
+            else diagnostics<<"Run "<<run<<": drift_voltage_v is unknown in "<<config.cutDBPath<<"; skipping voltage study\n";
+        }
+        return voltages;
+    }
+
+    inline void Voltage(const Config& config) {
+        // 8.1 Discover available ROOT inputs and resolve the detector DB's
+        // drift_voltage_v. A setup override changes geometry, not voltage.
+        auto assignments=ReadVoltages(config);
         std::vector<Summary> summaries;
         for (const auto& item : assignments) {
             int run = item.first;
-            if (!fs::exists(config.input / ("ntuple" + std::to_string(run) + ".root"))) {
-                std::cout << "Missing run " << run << '\n';
-                continue;
-            }
-            int voltage = item.second.size() == 1 ? *item.second.begin() : -1;
-            if (voltage < 0) std::cout << "Run " << run << " has conflicting voltages; it will not enter overlays\n";
-            auto summary = Analyze(run, voltage, config, geometry);
+            auto summary = Analyze(run, item.second, config, config.Mapping(run));
             std::cout << "Run " << run << ": " << summary.totalEvents << " events, " << summary.vetoes.size()
                 << " vetoes, " << summary.acceptedHits << " accepted hits\n";
             summaries.push_back(std::move(summary));
         }
-        if (summaries.empty()) throw std::runtime_error("No listed ROOT files found");
+        if (summaries.empty()) throw std::runtime_error("No available ROOT inputs with known drift_voltage_v in "+config.cutDBPath.string());
+
+        // Choose winners and export each setup independently. The same
+        // voltage in different setups must not compete for one overlay slot.
+        std::map<std::string,std::vector<Summary>> groups;
+        std::vector<int> runs;
+        for(const auto& s:summaries)runs.push_back(s.run);
+        auto scanOutput=config.OutputForRuns(runs)/"voltage";
+        for(auto& s:summaries)groups[s.setup].push_back(std::move(s));
+        for(auto& group:groups) {
+        auto& summaries=group.second;
 
         // 8.2 Choose one eligible file per voltage. Tie-break order: most raw
         // events, then most clean events, then the lower run number.
-        std::map<int, size_t> winners;
+        std::map<double, size_t> winners;
         // Most EVENTS means distinct Event values before cuts, not hit entries.
         for (size_t i = 0; i < summaries.size(); ++i) {
             auto& s = summaries[i];
-            if (s.voltage < 0 || config.excludedRuns.count(s.run)) continue;
+            if (config.excludedRuns.count(s.run)) continue;
             auto it = winners.find(s.voltage);
             if (it == winners.end()) winners[s.voltage] = i;
             else {
@@ -748,7 +827,7 @@ namespace PersonalTPC {
                     || (clean == oldClean && s.run < old.run)))) it->second = i;
             }
         }
-        if (winners.empty()) throw std::runtime_error("No eligible unambiguous voltage runs");
+        if (winners.empty()) throw std::runtime_error("No eligible voltage runs after configured run exclusions");
         for (auto& item : winners) summaries[item.second].selected = true;
         // Plotting and export order follow voltage, matching the Python overlay.
 
@@ -758,13 +837,14 @@ namespace PersonalTPC {
             if (a.selected != b.selected) return a.selected > b.selected;
             return a.selected ? a.voltage < b.voltage : a.run < b.run;
         });
-        auto out = config.output / "voltage";
+        auto out=groups.size()==1?scanOutput:scanOutput/group.first;
         fs::create_directories(out);
 
         // 8.4 Keep human/machine-readable CSVs beside the figures. The long
         // header strings define the exported columns; their order is intentional.
         std::ofstream summaryCSV(out / "run_summary.csv"), vetoCSV(out / "rejected_events.csv"), histCSV(out / "histograms.csv"),
             padCSV(out / "pad_histograms.csv");
+        summaryCSV<<std::setprecision(17);histCSV<<std::setprecision(17);padCSV<<std::setprecision(17);
         summaryCSV << "run,voltage,total_events,clean_events,accepted_events,total_hits,base_cut_hits,noise_events,additional_module_noise_events,noise_hits_after_base_cuts,accepted_hits,selected,mapped_accepted_hits,unmapped_accepted_hits\n";
         vetoCSV << "run,event,distinct_channels,total_hits,hits_passing_base_cuts,detector_wide,flooded_modules\n";
         histCSV << "run,voltage,time,count\n";
@@ -784,8 +864,7 @@ namespace PersonalTPC {
                 vetoCSV << s.run << ',' << n.event << ',' << n.distinct << ',' << n.totalHits << ',' << n.baseHits
                     << ',' << (n.detectorWide ? "True" : "False") << ',' << QuoteCSV(ModuleJSON(n)) << '\n';
             }
-            summaryCSV << s.run << ',';
-            if (s.voltage >= 0) summaryCSV << s.voltage;
+            summaryCSV << s.run << ',' << s.voltage;
             summaryCSV << ',' << s.totalEvents << ',' << s.totalEvents - s.vetoes.size() << ',' << s.acceptedEvents
                 << ',' << s.totalHits << ',' << s.baseHits << ',' << s.vetoes.size() << ',' << extra << ',' << noiseHits
                 << ',' << s.acceptedHits << ',' << (s.selected ? "True" : "False") << ',' << s.mappedHits << ','
@@ -794,7 +873,7 @@ namespace PersonalTPC {
 
         // 8.5 Native ROOT output: numerical TH1D/TH2D objects plus canvases.
         // Write only selected runs into this file; all run summaries and veto
-        // evidence remain in the CSVs, including unselected/conflicting runs.
+        // evidence remain in the CSVs, including unselected/excluded runs.
         auto rootPath = out / "time_histograms.root";
         TFile file(rootPath.c_str(), "RECREATE");
         TNamed("selection", config.CutText(true).c_str()).Write();
@@ -803,6 +882,7 @@ namespace PersonalTPC {
         TNamed("voltage_study_cuts_db", config.studyCutDBPath.c_str()).Write();
         config.StudyCuts().Snapshot(out / "voltage_study_cuts_used.ini");
         TNamed("settings_file", (config.source / "settings.csv").c_str()).Write();
+        for(const auto& s:summaries)ExportRunInfo(config,s.run,out,"run"+std::to_string(s.run)+"_");
         for (const auto& s : summaries) if (s.selected) {
             file.cd();
             s.time->Write();
@@ -811,7 +891,7 @@ namespace PersonalTPC {
             s.occupancy->Write();
             for (int b = 1; b <= config.timeMax; ++b) histCSV << s.run << ',' << s.voltage << ',' << b - 1
                 << ',' << std::llround(s.time->GetBinContent(b)) << '\n';
-            for (int b = 1; b <= 410; ++b) padCSV << s.run << ',' << s.voltage << ',' << b - 1 << ',' << std::llround(s.pad->GetBinContent(b))
+            for (int b = 1; b <= s.pad->GetNbinsX(); ++b) padCSV << s.run << ',' << s.voltage << ',' << b - 1 << ',' << std::llround(s.pad->GetBinContent(b))
                 << '\n';
         }
 
@@ -855,8 +935,9 @@ namespace PersonalTPC {
         }
         file.Close();
         std::cout << "Voltage outputs: " << out << "\nSelected:";
-        for (const auto& item : winners) std::cout << ' ' << item.first << " V";
+        for (const auto& item : winners) std::cout << ' ' << MetadataNumber(item.first) << " V";
         std::cout << std::endl;
+        }
     }
 
 
@@ -879,7 +960,7 @@ namespace PersonalTPC {
     }
 
     inline RawAxis RawBinning(const std::vector<double>& values,const std::string& branch,const Config& config,
-                             const std::map<std::string,std::string>& overrides={}) {
+                             const std::map<std::string,std::string>& overrides={},int run=-1) {
         std::ifstream file(config.binningPath);
         if(!file)throw std::runtime_error("Cannot read raw binning file: "+config.binningPath.string());
         std::string line;std::getline(file,line);std::vector<std::string> settings(6);
@@ -890,8 +971,9 @@ namespace PersonalTPC {
             if(!option(entry.first).empty())settings[entry.second]=option(entry.first);
         double low=0,high=0;
         if(!values.empty()){auto bounds=std::minmax_element(values.begin(),values.end());low=*bounds.first;high=*bounds.second;}
+        if(branch=="Pad"){low=0;high=config.Mapping(run).pads.size()-1;}
         if(branch=="Event" || branch=="Channel" || branch=="Hit" || branch=="Time" || branch=="Blockhead")low=std::min(0.,low);
-        if(branch=="Channel")high=std::max(high,double(config.channelsPerModule*config.readoutModules-1));
+        if(branch=="Channel")high=std::max(high,double(config.EffectiveChannels(run)-1));
         low=std::floor(low)-.5;high=std::ceil(high)+.5;
         if(!settings[3].empty())low=CutDatabase::Number(settings[3]);
         if(!settings[4].empty())high=CutDatabase::Number(settings[4]);
@@ -915,6 +997,7 @@ namespace PersonalTPC {
 
     inline void ShowCuts(const Config& config,int run) {
         const auto& db=config.Cuts();std::cout<<"Manual rejection DB: "<<db.path<<'\n';
+        std::cout<<"Run "<<run<<": "<<RunDescription(config,run)<<" (run configuration; tilt is informational)\n";
         for(const auto& rule:db.rules)if(db.Active(rule,run))
             std::cout<<'['<<rule.section<<"] line "<<rule.line<<": REJECT "<<rule.expression<<(rule.note.empty()?"":" # "+rule.note)<<'\n';
         std::cout<<"\nRules listed only; this command does not open plots.\n"
@@ -940,14 +1023,14 @@ namespace PersonalTPC {
             if(available && (requested.empty() || requested==field))branches.emplace_back(field);
         }
         if(branches.empty())throw std::runtime_error("No matching raw branch: "+onlyBranch);
-        auto out=config.output/"raw"/("run"+std::to_string(run));if(cleaned)out/="cleaned";
+        auto out=config.OutputForRun(run)/"raw"/("run"+std::to_string(run));if(cleaned)out/="cleaned";
         // A focused inspection must not replace the full run's ROOT file.
         if(!requested.empty())out/="branches_"+requested;
         fs::create_directories(out);
         std::vector<const Hit*> selected;
         for(const auto& h:data.hits)if(!cleaned || (!vetoes.count(h.event) && PassHit(h,config,false,run)))selected.push_back(&h);
-        auto unmapped=std::count_if(data.hits.begin(),data.hits.end(),[&](const Hit& h){return HitValue(h,"Pad",config)<0;});
-        auto selectedUnmapped=std::count_if(selected.begin(),selected.end(),[&](const Hit* h){return HitValue(*h,"Pad",config)<0;});
+        auto unmapped=std::count_if(data.hits.begin(),data.hits.end(),[&](const Hit& h){return HitValue(h,"Pad",config,run)<0;});
+        auto selectedUnmapped=std::count_if(selected.begin(),selected.end(),[&](const Hit* h){return HitValue(*h,"Pad",config,run)<0;});
         int summaryCount=requested.empty()?int(std::count_if(branches.begin(),branches.end(),[](const std::string& b){return b!="Channel";})):0;
         const std::string canvasStem="TPC_raw_"+std::to_string(run)+(cleaned?"_clean":"");
         TCanvas* canvas=nullptr;
@@ -958,23 +1041,23 @@ namespace PersonalTPC {
         }
         TFile output((out/"raw_histograms.root").c_str(),"RECREATE");
         TNamed("selection",cleaned?config.CutText(false,run).c_str():"UNCUT: all raw hit rows; no vetoes").Write();
-        auto mappingPath=config.source/"auxiliary/pad_map.csv";
+        auto mappingPath=config.Mapping(run).path;
         TNamed("mapping",(mappingPath.string()+": Pad from ROOT Channel; FADC=Channel+1; Pad=-1 is unmapped (underflow)").c_str()).Write();
-        fs::copy_file(mappingPath,out/"pad_map_used.csv",fs::copy_options::overwrite_existing);
+        ExportRunInfo(config,run,out);
         std::ofstream summary(out/"raw_summary.csv");
         summary<<"branch,total_rows,selected_rows,bins,low,high,underflow,overflow,log_y,selection,unmapped_rows,selected_unmapped_rows\n";
         for(size_t i=0;i<branches.size();++i) {
             const auto& branch=branches[i];std::vector<double> values;values.reserve(selected.size());
-            for(const auto* h:selected)values.push_back(HitValue(*h,branch,config));
+            for(const auto* h:selected)values.push_back(HitValue(*h,branch,config,run));
             // Use the uncut extent for both views: removed tail bins remain
             // visible as zeros instead of shrinking the cleaned axis.
             std::vector<double> rawAxisValues;rawAxisValues.reserve(data.hits.size());
-            for(const auto& h:data.hits)rawAxisValues.push_back(HitValue(h,branch,config));
-            auto axis=RawBinning(rawAxisValues,branch,config);
+            for(const auto& h:data.hits)rawAxisValues.push_back(HitValue(h,branch,config,run));
+            auto axis=RawBinning(rawAxisValues,branch,config,{},run);
             // Put run and selection on the exported figure as well as in
             // the filename, so an isolated image remains identifiable.
             std::string title = "Run " + std::to_string(run) + " | "
-                + (cleaned ? "CLEANED" : "UNCUT") + " | " + branch;
+                + (cleaned ? "CLEANED" : "UNCUT") + " | " + branch+RunAnnotation(config,run);
             std::string axisLabel=branch=="Pad"?"Pad number (0-based)":branch+" (native values)";
             if(branch=="Channel")axisLabel="ROOT Channel (0-based, fADC = Channel + 1)";
             TH1D histogram(("raw_"+branch).c_str(),(title+";"+axisLabel+";Raw Hits").c_str(),axis.bins,axis.low,axis.high);
@@ -1071,18 +1154,17 @@ namespace PersonalTPC {
         std::vector<const Hit*> selected;
         for(const auto& hit:data.hits)
             if(!cleaned || (!vetoes.count(hit.event) && PassHit(hit,config,false,run)))selected.push_back(&hit);
-        auto unmapped=std::count_if(selected.begin(),selected.end(),[&](const Hit* h){return HitValue(*h,"Pad",config)<0;});
+        auto unmapped=std::count_if(selected.begin(),selected.end(),[&](const Hit* h){return HitValue(*h,"Pad",config,run)<0;});
         auto definitions=Load2DPlots(config);
         if(!onlyPlot.empty()) {
             definitions.erase(std::remove_if(definitions.begin(),definitions.end(),[&](const Raw2DPlot& p){return p.name!=onlyPlot;}),definitions.end());
             if(definitions.empty())throw std::runtime_error("Unknown 2D plot: "+onlyPlot);
         }
-        auto out=config.output/"raw"/("run"+std::to_string(run));
+        auto out=config.OutputForRun(run)/"raw"/("run"+std::to_string(run));
         if(cleaned)out/="cleaned";
         out/="2d";
         if(!onlyPlot.empty())out/="plots_"+onlyPlot;
         fs::create_directories(out);
-        fs::copy_file(config.Auxiliary("pad_map.csv"),out/"pad_map_used.csv",fs::copy_options::overwrite_existing);
         fs::copy_file(config.plots2DPath,out/"raw_2d_plots_used.csv",fs::copy_options::overwrite_existing);
         fs::copy_file(config.binningPath,out/"raw_binning_used.csv",fs::copy_options::overwrite_existing);
         const std::string profile=cleaned?"CLEANED":"UNCUT";
@@ -1094,8 +1176,9 @@ namespace PersonalTPC {
             summary->Divide(columns,rows);
         }
         TFile file((out/"raw_2d_histograms.root").c_str(),"RECREATE");
+        ExportRunInfo(config,run,out);
         TNamed("selection",cleaned?config.CutText(false,run).c_str():"UNCUT: all raw hits; no vetoes").Write();
-        TNamed("mapping","Pad from established mapping; Pad=-1 for unconnected channels, retained in flow cells").Write();
+        TNamed("mapping",(config.Mapping(run).path.string()+": Pad=-1 for unconnected channels, retained in flow cells").c_str()).Write();
         if(cleaned){TNamed("cuts_db",config.cutDBPath.c_str()).Write();config.Cuts().Snapshot(out/"cuts_used.ini");}
         std::ofstream report(out/"raw_2d_summary.csv");
         report<<"name,x,y,total_rows,selected_rows,x_bins,y_bins,x_low,x_high,y_low,y_high,entries,visible_hits,outside_hits,nonfinite_hits,x_underflow,x_overflow,y_underflow,y_overflow,selected_unmapped_hits,log_z\n";
@@ -1108,17 +1191,17 @@ namespace PersonalTPC {
             }
             // Axis extents come from uncut data, even in cleaned mode.
             std::vector<double> rawX,rawY;rawX.reserve(data.hits.size());rawY.reserve(data.hits.size());
-            for(const auto& hit:data.hits){rawX.push_back(HitValue(hit,plot.x,config));rawY.push_back(HitValue(hit,plot.y,config));}
-            auto x=RawBinning(rawX,plot.x,config,plot.xOptions),y=RawBinning(rawY,plot.y,config,plot.yOptions);
+            for(const auto& hit:data.hits){rawX.push_back(HitValue(hit,plot.x,config,run));rawY.push_back(HitValue(hit,plot.y,config,run));}
+            auto x=RawBinning(rawX,plot.x,config,plot.xOptions,run),y=RawBinning(rawY,plot.y,config,plot.yOptions,run);
             if(size_t(x.bins+2)*size_t(y.bins+2)>4000000)
                 throw std::runtime_error(plot.name+": more than 4 million 2D cells; increase BinWidth or narrow limits in raw_2d_plots.csv");
-            std::string title="Run "+std::to_string(run)+" | "+profile+" | "+plot.y+" vs "+plot.x;
+            std::string title="Run "+std::to_string(run)+" | "+profile+" | "+plot.y+" vs "+plot.x+RunAnnotation(config,run);
             std::string labels=title+";"+Raw2DLabel(plot.x,x)+";"+Raw2DLabel(plot.y,y)+";Raw Hits";
             TH2D histogram(("raw2d_"+plot.name).c_str(),labels.c_str(),x.bins,x.low,x.high,y.bins,y.low,y.high);
             histogram.SetDirectory(nullptr);histogram.SetStats(false);histogram.SetOption("COLZ");
             long long nonfinite=0;
             for(const auto* hit:selected) {
-                double xv=HitValue(*hit,plot.x,config),yv=HitValue(*hit,plot.y,config);
+                double xv=HitValue(*hit,plot.x,config,run),yv=HitValue(*hit,plot.y,config,run);
                 if(std::isfinite(xv) && std::isfinite(yv))histogram.Fill(xv,yv);else ++nonfinite;
             }
             auto visible=std::llround(histogram.Integral(1,x.bins,1,y.bins));
@@ -1166,10 +1249,12 @@ namespace PersonalTPC {
 
     // Print the actual paths and active profiles for this invocation.
     // Useful after editing settings or when running from another directory.
-    inline void Info(const Config& config, const Geometry& geometry) {
+    inline void Info(const Config& config, const Geometry& geometry,int run=-1) {
         std::cout << "C++/ROOT analysis\nSettings: " << config.source / "settings.csv" << "\nInput: "
-            << config.input << "\nOutput: " << config.output << "\nMapping: " << geometry.pads.size() << " pads, medium 0-249 below large 250-409\nEvent cuts: "
-            << config.CutText() << "\nCut DB: " << config.cutDBPath << "\nIndependent voltage-study DB: " << config.studyCutDBPath << "\nVeto ledger: " << config.VetoFile()
+            << config.input << "\nOutput: " << config.OutputForRun(run) << "\nRun configuration for "<<run<<": "<<RunDescription(config,run)
+            <<"\nMapping: "<<geometry.path<<" ("<<geometry.pads.size()<<" connected pads, "<<geometry.width<<'x'<<geometry.height
+            <<" mm, "<<geometry.blankTiles.size()<<" blank small tiles)\nEvent cuts: "
+            << config.CutText(false,run) << "\nCut DB: " << config.cutDBPath << "\nIndependent voltage-study DB: " << config.studyCutDBPath << "\nVeto ledger: " << config.VetoFile(run)
             << std::endl;
     }
 
@@ -1177,10 +1262,31 @@ namespace PersonalTPC {
     // consistency check, not a proof that a physics selection is optimal.
     // Deliberate geometry/cut changes may require updating the fixtures.
     inline void SelfCheck(const Config& config, const Geometry& geometry) {
-        for (auto anchor : std::map<int, int> { { 153, 0 }, { 151, 1 }, { 149, 2 }, { 147, 3 }, { 16, 24 }, { 163,
-            25 }, { 505, 250 }, { 576, 395 }, { 568, 399 }, { 431, 409 } }) Check(geometry.Number(anchor.first - 1) == anchor.second,
+        if(geometry.setup=="large_medium") {
+        for (auto anchor : std::map<int, int> { { 505, 0 }, { 487, 1 }, { 431, 159 }, { 153, 160 }, { 151, 161 },
+            { 149, 162 }, { 147, 163 }, { 16, 184 }, { 163, 185 }, { 128, 409 }, { 576, 145 }, { 568, 149 } }) Check(geometry.Number(anchor.first - 1) == anchor.second,
             "Wiring anchor mismatch");
         Check(geometry.Number(0) == -1 && geometry.Number(1) == -1 && geometry.Number(2) == -1, "Unconnected channels mapped unexpectedly");
+        // Section origins and the numbering transition must agree with the CSV.
+        Check(geometry.pads[0].section == "Large" && geometry.pads[0].x == 0 && geometry.pads[0].y == 0,
+            "Pad0 must be the lower-left large pad");
+        Check(geometry.pads[159].section == "Large" && geometry.pads[159].y == 35 &&
+            geometry.pads[160].section == "Medium" && geometry.pads[160].x == 0 && geometry.pads[160].y == 40,
+            "Large-to-medium section transition mismatch");
+        } else {
+            Check(geometry.pads.size()==506 && geometry.blankTiles.size()==244 &&
+                  std::count_if(geometry.pads.begin(),geometry.pads.end(),[](const Pad& p){return p.section=="Medium";})==250 &&
+                  std::count_if(geometry.pads.begin(),geometry.pads.end(),[](const Pad& p){return p.section=="Small";})==256,
+                  "Expected 250 medium, 256 connected small and 244 blank small tiles");
+            for(auto anchor:std::map<int,int>{{153,0},{128,249},{437,250},{569,314},{423,315},{567,338},{425,339},{290,505}})
+                Check(geometry.Number(anchor.first-1)==anchor.second,"Medium/small wiring anchor mismatch");
+            Check(geometry.Number(576)==-1 && geometry.Number(578)==-1 && geometry.byChannel.rbegin()->first<=575,
+                  "Unconnected fADC577/579 mapped or MS wiring exceeds Channels0-575");
+            for(int row:{2,3})
+                Check(std::any_of(geometry.blankTiles.begin(),geometry.blankTiles.end(),[&](const Pad& p){
+                    return p.row==row && p.col==25 && p.number==-1 && p.channel==-1 && p.fadc==-1;
+                }),"Central small gap must be an unconnected blank tile");
+        }
         // The working DB is user-editable. Validate its schema, rather than
         // requiring historical Time/Channel exclusions to stay enabled.
         // Fixed cut-boundary fixtures live in tests/RunCutsCheck.C.
@@ -1197,19 +1303,21 @@ namespace PersonalTPC {
         auto noise = ClassifyEvent(synthetic, 1, synthetic.events.at(1), config);
         Check(noise.Vetoed(), "Synchronous module burst not vetoed");
 
-        // For the current 100x80-mm plane, every 1-mm cell must belong to
-        // exactly one pad. This detects gaps, overlap, and incorrect stacking.
-        std::vector<int> coverage(100 * 80);
-        for (const auto& p : geometry.pads)
+        // Every 1-mm cell belongs to one connected pad or blank tile.
+        // This detects gaps, overlap, and incorrect stacking for either setup.
+        int boardWidth=std::lround(geometry.width),boardHeight=std::lround(geometry.height);
+        std::vector<int> coverage(boardWidth*boardHeight);
+        auto tiles=geometry.pads;tiles.insert(tiles.end(),geometry.blankTiles.begin(),geometry.blankTiles.end());
+        for (const auto& p : tiles)
             for (int y = std::lround(p.y); y < std::lround(p.y + p.height); ++y)
                 for (int x = std::lround(p.x); x < std::lround(p.x + p.width); ++x) {
-                    Check(x >= 0 && x < 100 && y >= 0 && y < 80, "Pad outside board");
-                    ++coverage[y * 100 + x];
+                    Check(x >= 0 && x < boardWidth && y >= 0 && y < boardHeight, "Pad outside board");
+                    ++coverage[y * boardWidth + x];
                 }
         Check(std::all_of(coverage.begin(), coverage.end(), [](int n) {
             return n == 1;
         }), "Pad footprints have gaps or overlap");
-        std::cout << "PASS: wiring anchors, disconnected channels, detector cuts, separate study restrictions, module noise and complete 410-pad board coverage."
+        std::cout << "PASS: mapping, detector cuts, separate study restrictions, module noise and complete physical board coverage ("<<geometry.pads.size()<<" connected pads)."
             << std::endl;
     }
 
@@ -1261,17 +1369,19 @@ namespace PersonalTPC {
 //   vetoCSV: explicit automatic-event ledger (empty = generated or snapshot).
 //   cutsDB: manual DB override (empty = ../config/run_cuts.ini).
 //   studyCutsDB: independent voltage-study DB override (voltage command only).
+//   setup: empty = detector DB/global/run metadata, otherwise large_medium
+//          or medium_small. LM keeps its established destination; MS defaults
+//          to results/root/setups/medium_small. Explicit output is honored.
 //
 // Config is reconstructed on each call, so settings.csv edits take effect
 // immediately. Manual cuts/binning are shared through config/; ROOT noise
 // settings and source remain independent from the Python implementation.
 void TPC(const char* command = "menu", int run = 1616, int event = -1, const char* inputDirectory = "", const char* outputDirectory = "",
-    const char* vetoCSV = "", const char* cutsDB = "", const char* studyCutsDB = "") {
+    const char* vetoCSV = "", const char* cutsDB = "", const char* studyCutsDB = "",const char* setup="") {
     using namespace PersonalTPC;
 
-    // Load configuration and the established pad map once per command.
-    Config config(inputDirectory, outputDirectory, vetoCSV, cutsDB, studyCutsDB);
-    Geometry geometry(config);
+    // Each run resolves its own setup/map, including in multi-run commands.
+    Config config(inputDirectory, outputDirectory, vetoCSV, cutsDB, studyCutsDB,setup);
 
     // Apply your palette before any histogram/canvas is drawn. Edit the
     // stops/RGB arrays in set_color_env() above to personalize it. Calling
@@ -1296,8 +1406,22 @@ void TPC(const char* command = "menu", int run = 1616, int event = -1, const cha
         throw std::runtime_error("Dimension flags apply to raw or raw-clean commands");
     if (action == "menu") action = Menu(run, event);
     if (action == "quit") return;
+    // Multi-run commands never load a map for the dispatcher's default run.
+    // Save/browse below resolve the requested run; raw does so in ReadRun.
+    struct BatchGuard {
+        bool previous;
+        BatchGuard():previous(gROOT->IsBatch()){gROOT->SetBatch(true);}
+        ~BatchGuard(){gROOT->SetBatch(previous);}
+    };
+    if(action=="examples" || action=="voltage") {
+        BatchGuard guard;
+        if(action=="examples")Examples(config);else Voltage(config);
+        return;
+    }
+    if (action == "cuts") { ShowCuts(config, run); return; }
+    const auto& geometry=config.Mapping(run);
     if (action == "info") {
-        Info(config, geometry);
+        Info(config, geometry,run);
         return;
     }
     if (action == "check") {
@@ -1308,7 +1432,6 @@ void TPC(const char* command = "menu", int run = 1616, int event = -1, const cha
         Browse(config, geometry, run, event, action == "event3d");
         return;
     }
-    if (action == "cuts") { ShowCuts(config, run); return; }
     if(action=="raw" || action=="raw-clean") {
         // Read the ntuple once. Both drawing groups share input and the
         // same Config, including the cached detector-cut database.
@@ -1332,20 +1455,8 @@ void TPC(const char* command = "menu", int run = 1616, int event = -1, const cha
     // Batch exports do not require windows. Restore the caller's ROOT mode
     // afterwards so a later interactive command can still open canvases.
 
-    // RAII guard: even if export throws, the destructor restores the
-    // previous batch setting instead of leaving the user session headless.
-    struct BatchGuard {
-        bool previous;
-        BatchGuard() : previous(gROOT->IsBatch()) {
-            gROOT->SetBatch(true);
-        }
-        ~BatchGuard() {
-            gROOT->SetBatch(previous);
-        }
-    } guard;
+    BatchGuard guard;
     if (action == "save") SaveEvent(config, geometry, run, event);
-    else if (action == "examples") Examples(config, geometry);
-    else if (action == "voltage") Voltage(config, geometry);
     else throw std::runtime_error("Commands: menu, event, event3d, save, examples, voltage, raw, raw:Branch, raw-clean, raw2d, raw2d-clean, cuts, info, check");
 
 

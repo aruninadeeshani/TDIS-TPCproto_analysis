@@ -1,0 +1,67 @@
+{
+  "setup": "medium_small",
+  "numbering": "Connected pads only; Medium first; left to right then bottom to top",
+  "physical_small_pads": 500,
+  "connected_small_pads": 256,
+  "unconnected_small_pads": 244,
+  "medium_pads": 250,
+  "connected_pad_count": 506,
+  "excluded_legacy_entries": [
+    {
+      "FADC": 577,
+      "Row": 3,
+      "Col": 25,
+      "reason": "Expert-confirmed disconnected"
+    },
+    {
+      "FADC": 579,
+      "Row": 2,
+      "Col": 25,
+      "reason": "Expert-confirmed disconnected"
+    }
+  ],
+  "inputs": {
+    "reference/wiring/pad_channel_map_small&medium x&y.txt": "cdcbb294cf54383fb36c55e89764302ef0743c09205c3506197e58a2572a60e8",
+    "reference/wiring/small_and_medium.jpg": "15bb92e50dabef07df141b5f977790a6ac68e5ec1fb41a4f6df62dbdaad543d3",
+    "reference/wiring/small.jpg": "7e8bc35acf3ee3b7514e3fb9a789676fa492d2f8c1a2fb7d921563176a8b9f67"
+  },
+  "replacement_image_check": {
+    "source": "reference/wiring/small.jpg",
+    "title": "Small size fADC channel map",
+    "previous_source_sha256": "ba50c5efeeeb0ba9275c678d7d952281e44e51d7a885ad3813a9db5c99f20065",
+    "source_sha256": "7e8bc35acf3ee3b7514e3fb9a789676fa492d2f8c1a2fb7d921563176a8b9f67",
+    "connected_positions_checked": 256,
+    "changed_assignments": 2,
+    "audit_csv": "small_image_audit.csv",
+    "audit_sha256": "8ae3fefb32547aa4d7f965b317d55fc390497e94e7a72e2f36fc9737483681fd",
+    "notes": "The image prints577/579 on two central white cells, but the detector expert confirms both are disconnected. They retain physical gaps, no Pad ID, and no channel mapping. All other256 connected positions retain their fADC labels.",
+    "disconnected_labelled_positions_checked": 2
+  },
+  "connectivity_rule": "Expert-confirmed wiring overrides printed labels:577 and579 are disconnected. Only connected pads receive Pad IDs.",
+  "renumbered_existing_pads": 191,
+  "renumbering_csv": "pad_renumbering_medium_small.csv",
+  "expert_confirmation": {
+    "source": "User reports confirmation from detector expert",
+    "disconnected_fadc": [
+      577,
+      579
+    ],
+    "physical_gap_positions": [
+      {
+        "Row": 2,
+        "Col": 25
+      },
+      {
+        "Row": 3,
+        "Col": 25
+      }
+    ]
+  },
+  "diagram_label_style": {
+    "numbering_fit_reductions": 0,
+    "numbering_small_font_pt": 8,
+    "numbering_medium_font_pt": 10,
+    "comparison_fit_reductions": 0,
+    "comparison_font_pt": 9.2
+  }
+}

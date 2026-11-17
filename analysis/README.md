@@ -37,10 +37,10 @@ input/mapping/selection and one window loop. `--1d` / `--2d` select a group;
 `--dimensions both|1d|2d` is also available. The 1D group opens a 3-by-2
 summary and six individual windows (Event,
 Pad, Hit, Time, Charge, Pedestal). Pad always uses the established mapping,
-0–409; unconnected channels are counted as Pad=-1 in underflow. Mapping
+0–409 for large/medium or 0–505 for medium/small; unconnected channels are counted as Pad=-1 in underflow. Mapping
 does not remove hit rows from the other distributions. Blockhead is omitted. All seven views
 are accompanied by a separate original Channel diagnostic (electronics
-0–575, including unconnected channels). All eight views are saved as PNG/PDF
+0–575 for large/medium or 0–575 for medium/small, including unconnected channels). All eight views are saved as PNG/PDF
 and native canvases in `raw_histograms.root`, alongside their seven TH1
 histograms. Close the windows to finish, or use `--batch` for unattended
 exports. `raw 1616 --branches Channel` opens only the Channel diagnostic,
@@ -77,7 +77,7 @@ The independent voltage comparison keeps its additional restrictions in
 `config/voltage_study_cuts.ini`; only the voltage command reads that file.
 
 **Mapping:** `auxiliary/pad_map.csv` is the established mapping; no builder
-needs to run. Pads 0–249 are medium, below large pads 250–409. The printed
+needs to run. Large pads 0–159 are below medium pads 160–409; pad0 is fADC505. Rows run left to right, then upward. `auxiliary/pad_renumbering.csv` translates the previous Pad IDs; wiring is unchanged. The printed
 one-based fADC label equals `Channel + 1`. Unconnected channels have no pad.
 The top-row wiring corrections are already included.
 
@@ -107,9 +107,9 @@ otherwise it uses the bundled snapshot. For different data, generate a
 new ledger with the voltage command or pass `--veto-file` to event/examples.
 
 The voltage scan selects the file with the most distinct events per
-voltage. Run 1603 remains excluded. Run 1605 still has conflicting 8250/
-8500 V entries; resolve it explicitly with `voltage --voltage-override
-RUN=VOLTS`. `data/datafiles-voltage.txt` is the working run/voltage table. `--voltage-file` can select another table.
+voltage. Run 1603 remains excluded. Run1605 has an unknown voltage because the former table listed both 8250 and
+8500 V. Set its actual `drift_voltage_v` in `config/run_cuts.ini`. The DB is
+the sole run/voltage source; runs without known voltages are skipped.
 
 Physical displays retain the first passing hit per channel; voltage
 histograms count all accepted raw hits. Missing pad values are drawn as
@@ -133,3 +133,24 @@ not loaded; the active settings are only in the top-level `settings.csv`.
 Raw inspection uses `raw_binning.csv` in the shared config folder.
 Use `raw --apply-cuts` to compare cleaning, and `--cuts-db` to select an
 alternative complete manual-cut database. DB snapshots accompany exports.
+
+## Run setup metadata
+
+See [setup and run information](../config/README.md#detector-setup-and-run-information).
+`setup`, `drift_voltage_v` and `tilt_angle_deg` belong in the detector DB,
+with global defaults and per-run overrides. Drift voltage supplies voltage-study assignments; tilt is informational.
+Uncut plots still select the run mapping. The additional `auxiliary/pad_map_medium_small.csv` has 506 connected pads:
+Medium 0–249 below Small 250–505, retaining 244 unconnected small positions.
+Existing runs retain their configured large/medium setup until their DB block is changed.
+The replacement `small.jpg` supplies fADC labels, checked at all 256 connected positions;
+`small_and_medium.jpg` supplies full-board placement. See `auxiliary/small_image_audit.csv`.
+
+Expert confirmation: 577/579 are disconnected and have no Pad IDs. The central
+gap is retained. The 506-pad map supersedes the 508-pad version; use
+`auxiliary/pad_renumbering_medium_small.csv` to translate prior Pad rules
+and regenerate earlier medium/small exports.
+
+The fADC correspondence diagnostic is `auxiliary/small_vs_large_fadc.pdf`;
+its CSV lists all 256 connected Small pads and a Large Pad ID where available. Orange
+marks 97 labels with no connected Large-pad counterpart. Disconnected 577/579 are shown as a central gap.
+The largest Large label is 576 (Large Pad145). This is a wiring diagnostic.

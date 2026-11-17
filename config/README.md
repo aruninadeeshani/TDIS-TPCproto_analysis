@@ -52,10 +52,10 @@ negative, fractional or scientific notation; they remain in native units.
 
 A Channel exclusion also removes its mapped pad's hits: all rules select
 raw hit rows before any cleaned histogram or event display is populated.
-For the current mapping, `Channel == 152`, `FADC == 153`, and `Pad == 0`
+For the current mapping, `Channel == 504`, `FADC == 505`, and `Pad == 0`
 are equivalent ways to reject the same pad. One rule is sufficient. The
-numbers themselves are not interchangeable: ROOT Channel152 is Pad0,
-not Pad152. Uncut raw views intentionally bypass all these DB rules.
+numbers themselves are not interchangeable: ROOT Channel504 is Pad0,
+not Pad504. Uncut raw views intentionally bypass all these DB rules.
 
 Operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `not in`.
 `in 40..45` includes **both** endpoints. `in 12,44,271` is a value list.
@@ -99,9 +99,9 @@ python analysis/tpc.py event 1616 --event 5584 --save
 The six plotted quantities are Event, **Pad**, Hit, Time, Charge, and Pedestal;
 Blockhead is omitted. Pad is derived from Channel using the established
 mapping, always, even without cleaning: ROOT Channel -> printed FADC
-(Channel+1) -> zero-based Pad. Medium pads occupy 0–249, large pads 250–409.
+(Channel+1) -> zero-based Pad. Large pads occupy 0–159 below medium pads 160–409. Pad0 is the lower-left large pad (fADC505); rows run left to right, then upward. The old/new correspondence is in each engine’s `auxiliary/pad_renumbering.csv`. Translate Pad-based rules in older cut databases; Channel/FADC values are unchanged.
 The original electronics **Channel** branch is also plotted in an extra
-standalone diagnostic canvas, with all 576 channels (0–575), including
+standalone diagnostic canvas, with all configured/mapped channels (0–575 for large/medium; 0–575 for medium/small), including
 unconnected channels. Its axis explicitly states that printed fADC is
 Channel+1. `--branches Channel` / ROOT `raw:Channel` inspect electronics;
 `--branches Pad` / `raw:Pad` inspect mapped pads.
@@ -159,7 +159,7 @@ Edit `raw_binning.csv` for persistent per-branch choices. `BinWidth` is in
 native units; a nonempty `Bins` takes precedence. `Min`/`Max` are histogram
 **edges**, not rejection cuts. Empty limits use the full raw extent; log
 scales are controlled by `LogY`. Integer branches default to one bin/value;
-Pad includes the full 0–409 detector, Channel includes electronics 0–575,
+Pad includes all connected pads (large/medium 0–409; medium/small 0–505), Channel includes electronics 0–575 for large/medium or 0–575 for medium/small,
 and Charge includes negative data.
 Counts below/above a plotting range are reported as under/overflow. All
 bins, including the final one, use ROOT's `[low, high)` convention.
@@ -215,7 +215,7 @@ tables, a summary (Python JSON / ROOT CSV), and configuration/mapping
 snapshots. Focused exports use a `plots_NAME/` subfolder.
 
 Mapping and cleaning follow exactly the 1D convention: Pad is always
-0–409, with unconnected hits at Pad=-1 in underflow. Time vs Charge includes
+0–409 for large/medium or 0–505 for medium/small, with unconnected hits at Pad=-1 in underflow. Time vs Charge includes
 those hits because it has no Pad axis. Raw views bypass the DB and vetoes;
 cleaned views apply the detector global/run DB and automatic event vetoes.
 The independent voltage-study restrictions are never applied here.
@@ -292,3 +292,53 @@ root -l -b -q 'analysis_root/TPC.C("save",1616,5584,"","","","/path/cuts.ini")'
 
 Both shareable ZIPs include this `config/` folder. Keep it beside `analysis/`
 or `analysis_root/` when copying the programs.
+
+## Detector setup and run information
+
+The shared run DB is the sole source of run voltages and accepts metadata beside `reject` rules:
+
+```ini
+[global]
+setup = large_medium
+
+[run 9999]
+# Example only: replace with an actual run and its measured values.
+setup = medium_small
+drift_voltage_v = 8000
+tilt_angle_deg = 5
+```
+
+Global values are inherited; run values override only the named fields. Blank
+numeric values mean unknown. Voltage is in V, angle in degrees. They are
+run information: drift voltage supplies the independent study assignment, while
+tilt is informational. No hit cut, drift calibration, or coordinate rotation is implied.
+There is no separate run/voltage file. Available inputs without a known DB voltage
+are skipped by the voltage study. Resolve run1605 in the DB; its old table was ambiguous.
+The `setup` field chooses mapping even in uncut raw inspection. The supported
+names are `large_medium` (the existing setup) and `medium_small` (medium below
+connected central small pads). Its installed `pad_map_medium_small.csv` has
+Medium 0–249 and Small 250–505: 256 connected small pads and 244 unconnected physical
+small positions. Expert confirmation overrides the printed 577/579 labels:
+these two central positions are disconnected, with no Pad IDs. The other 256
+Small positions retain their fADC labels. The comparison diagram shows the
+gap and has larger pad/fADC labels, fitted inside their boxes. Assign the setup in the appropriate run block.
+
+Pad cuts refer to the selected setup. Use Channel/FADC rules for an electronics
+exclusion intended across setups. Unconnected physical positions have no Pad ID;
+they stay empty in the physical display. Default Pad axes cover every connected
+pad of the selected setup. Explicit CSV/command plotting limits still work.
+
+Python `--setup` overrides the DB; `--pad-map` overrides the selected CSV. ROOT
+accepts a final optional setup argument, after the independent study DB. Exported
+run information records the resolved mapping and metadata; nondefault setups use
+`results/ENGINE/setups/medium_small/` unless an output directory is supplied.
+
+```bash
+python analysis/tpc.py info --run 1616
+python analysis/tpc.py raw 1616 --setup large_medium
+root -l 'analysis_root/TPC.C("raw",1616,-1,"","","","","","large_medium")'
+```
+
+The earlier 508-pad small/medium map is superseded. Use each engine’s
+`auxiliary/pad_renumbering_medium_small.csv` to translate old Pad rules,
+and regenerate old medium/small exports. Channel/FADC cuts retain their values.

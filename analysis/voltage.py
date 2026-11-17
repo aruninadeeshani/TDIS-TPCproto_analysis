@@ -4,15 +4,18 @@ General detector cleaning comes from config/run_cuts.ini. This independent
 study adds config/voltage_study_cuts.ini; settings.csv controls noise
 thresholds. Edit this file for binning, normalization, run selection and
 audit plots. The separate study DB retains the original Channel limit.
+The detector DB's inherited drift_voltage_v is the sole scan assignment;
+available ntuples with unknown voltage are skipped.
 Every accepted raw hit contributes; first-hit display reduction is absent.
 """
 import csv
+import hashlib
 import json
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
-from detector import (channel_to_pad, DEFAULT_PAD_MAP, DEFAULT_INPUT_DIR,
-    AUXILIARY_DIR, TIME_CUT_MAX, VOLTAGE_CUT, NOISE_CHANNELS, MODULE_CHANNELS,
+from detector import (scan_run_contexts, channel_to_pad, load_pad_records, resolve_pad_map, DEFAULT_INPUT_DIR,
+    TIME_CUT_MAX, VOLTAGE_CUT, NOISE_CHANNELS, MODULE_CHANNELS,
     MODULE_SYNCHRONOUS, MODULE_HITS_PER_CHANNEL, CHANNELS_PER_MODULE,
     READOUT_MODULES, EXCLUDED_RUNS, select_hit_mask, module_floods, results_directory, DEFAULT_CUTS_DB, DEFAULT_VOLTAGE_STUDY_DB, cut_database, load_hit_arrays)
 
@@ -24,6 +27,32 @@ def write_csv(path, rows, fields):
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def snapshot_pad_map(path, destination, out):
+    """Freeze the effective wiring used by BOTH cut DBs and the pad plots."""
+    contents = path.read_bytes()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(contents)
+    records = load_pad_records(destination)
+    sections = []
+    for record in records:
+        if not sections or sections[-1]['name'] != record['PadSize']:
+            sections.append(dict(name=record['PadSize'], pad_range=[record['Pad'], record['Pad']]))
+        else:
+            sections[-1]['pad_range'][1] = record['Pad']
+    return dict(csv=str(path.resolve()), snapshot=str(destination.relative_to(out)),
+                sha256=hashlib.sha256(contents).hexdigest(), pad_count=len(records),
+                channel_count=max(CHANNELS_PER_MODULE*READOUT_MODULES, max(r['Channel'] for r in records)+1),
+                pad_range=[0, len(records) - 1], sections=sections)
+
+
+def default_output_directory(source, setups):
+    """Keep the established LM destination; isolate a wholly MS scan."""
+    base = results_directory(source)
+    if set(setups) == {'medium_small'}:
+        base = base / 'setups' / 'medium_small'
+    return base / 'voltage'
 
 
 def render_run1610_audit(out, event, time, events, occupancy, base, bad, global_bad, bins, counts):
@@ -76,15 +105,16 @@ def add_arguments(parser):
     """Attach voltage-specific options to tpc.py voltage; no separate command."""
     parser.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR)
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--voltage-file", type=Path,
-                        help="Run/voltage table; default checks input-dir, data/, then the bundled auxiliary table")
-    parser.add_argument("--pad-map", type=Path, default=DEFAULT_PAD_MAP)
-    parser.add_argument("--cuts-db", type=Path, default=DEFAULT_CUTS_DB)
+    parser.add_argument("--setup", choices=['large_medium', 'medium_small'],
+                        help="Override the detector DB setup for every run in this scan")
+    parser.add_argument("--pad-map", type=Path, default=None,
+                        help="Explicit wiring CSV override; otherwise resolve the map from each run's setup")
+    parser.add_argument("--cuts-db", type=Path, default=DEFAULT_CUTS_DB,
+                        help="Detector cuts and run metadata; inherited drift_voltage_v assigns scan voltages")
     parser.add_argument("--study-cuts-db", type=Path, default=DEFAULT_VOLTAGE_STUDY_DB,
                         help="Independent voltage-study restrictions, applied in addition to detector cleaning")
     parser.add_argument("--noise-channels", type=int, default=NOISE_CHANNELS,
                         help="Reject events with at least this many distinct channels before any cuts")
-    parser.add_argument("--voltage-override", action="append", default=[], metavar="RUN=VOLTS")
     parser.add_argument("--exclude-run", action="append", type=int, default=EXCLUDED_RUNS.copy(),
                         help="Run excluded from voltage overlays (1603 excluded by default)")
     parser.add_argument("--module-channels", type=int, default=MODULE_CHANNELS,
@@ -97,42 +127,34 @@ def run(args):
     """Calculate the existing voltage scan, audits, CSV/NPZ and ROOT histograms."""
     import ROOT  # Load only when the voltage command actually reads ROOT data.
     source = args.input_dir.resolve()
-    out = args.output_dir or results_directory(source) / 'voltage'
-    out.mkdir(parents=True, exist_ok=True)
     ROOT.gROOT.SetBatch(True)
     database = cut_database(args.cuts_db)
     study_database = cut_database(args.study_cuts_db)
     global CUT
     CUT = database.describe() + ' && ' + study_database.describe() + "; per-run DB rules"
 
-    assignments = {}
-    voltage_file = args.voltage_file or source / "datafiles-voltage.txt"
-    if not voltage_file.exists() and args.voltage_file is None:
-        # In this workspace the editable run table lives in data/, beside
-        # its root/ subdirectory. Bundled snapshots keep sharing portable.
-        voltage_file = source.parent / 'datafiles-voltage.txt'
-        if not voltage_file.exists():
-            voltage_file = AUXILIARY_DIR / "datafiles-voltage.txt"
-    # Repeated voltages are allowed; inconsistent voltages for the SAME
-    # run are excluded until a --voltage-override resolves that run.
-    for line in voltage_file.read_text().splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            run, voltage = map(int, line.split())
-            assignments.setdefault(run, set()).add(voltage)
-    for override in args.voltage_override:
-        run, voltage = map(int, override.split("="))
-        assignments[run] = {voltage}
-    conflicts = {run: sorted(v) for run, v in assignments.items() if len(v) != 1}
-    missing = [run for run in assignments if not (source / f"ntuple{run}.root").exists()]
-    unmapped = sorted(int(p.stem[6:]) for p in source.glob("ntuple*.root")
-                      if p.stem[6:].isdigit() and int(p.stem[6:]) not in assignments)
+    # The detector DB is the sole authority for geometry AND scan voltages;
+    # the independent study DB contributes only additional hit restrictions.
+    setup_override = getattr(args, 'setup', None)
+    run_contexts, run_metadata, skipped_runs = scan_run_contexts(
+        source, database, setup=setup_override, pad_map=args.pad_map)
+    if not run_metadata:
+        raise ValueError(f"No ntupleNNNN.root input files found in {source}")
+    if not run_contexts:
+        raise ValueError(f"No available runs have known drift_voltage_v; set run voltages in {database.path}")
+    out = args.output_dir or default_output_directory(
+        source, [context['info']['setup'] for context in run_contexts.values()])
+    out.mkdir(parents=True, exist_ok=True)
+    run_mappings = {}
     results, noise_rows, occupancy_data, pad_data = [], [], {}, {}
     bins = np.arange(-0.5, TIME_CUT_MAX + 0.5, 1.0)  # One native Time count per bin.
-    for run, voltages in sorted(assignments.items()):
-        path = source / f"ntuple{run}.root"
-        if not path.exists():
-            continue
+    for run, context in run_contexts.items():
+        path = context['input_path']
+        effective_map = out / 'pad_maps' / f'run{run}_pad_map_used.csv'
+        mapping = snapshot_pad_map(context['path'], effective_map, out)
+        run_mappings[str(run)] = dict(setup=context['info']['setup'], **mapping)
+        pad_count = mapping['pad_count']
+        pad_bins = np.arange(-0.5, pad_count + 0.5)
         arrays, input_file = load_hit_arrays(path)
         event, channel, time = (arrays[k] for k in ("Event", "Channel", "Time"))
         events, rows_per_event = np.unique(event, return_counts=True)
@@ -149,14 +171,14 @@ def run(args):
         # Apply hit cuts after identifying whole-event noise. Keep this
         # voltage=True flag here; event displays use voltage=False.
         base = select_hit_mask(event, channel, time, voltage=True, run=run, cuts_db=database,
-                               study_cuts_db=study_database, arrays=arrays, pad_map=args.pad_map)
+                               study_cuts_db=study_database, arrays=arrays, pad_map=effective_map)
         keep = base & ~is_noise
         counts, _ = np.histogram(time[keep], bins=bins)
-        pads = channel_to_pad(channel, args.pad_map)
+        pads = channel_to_pad(channel, effective_map)
         mapped = keep & (pads >= 0)  # Unconnected electronics have Pad=-1.
-        pad_counts = np.bincount(pads[mapped], minlength=410)
+        pad_counts = np.bincount(pads[mapped], minlength=pad_count)
         time_pad, _, _ = np.histogram2d(pads[mapped], time[mapped],
-                                       bins=(np.arange(-0.5, 410.5), bins))
+                                       bins=(pad_bins, bins))
         assert int(pad_counts.sum()) + int(np.count_nonzero(keep & (pads < 0))) == int(keep.sum())
         pad_data[run] = dict(counts=pad_counts, time_pad=time_pad)
         assert counts.sum() == keep.sum(), "Histogram range omitted accepted times"
@@ -168,7 +190,11 @@ def run(args):
                                    hits_passing_base_cuts=int(np.count_nonzero(base & (event == ev))),
                                    detector_wide=bool(ev in global_bad),
                                    flooded_modules=json.dumps(module_details.get(int(ev), []))))
-        result = dict(run=run, voltage=next(iter(voltages)) if len(voltages) == 1 else None,
+        result = dict(**context['info'],
+                      voltage=context['info']['drift_voltage_v'],
+                      pad_map=mapping['csv'], pad_map_snapshot=mapping['snapshot'],
+                      pad_map_sha256=mapping['sha256'], pad_count=pad_count,
+                      channel_count=max(mapping['channel_count'], int(np.max(channel, initial=-1))+1),
                       total_events=len(events), clean_events=len(events) - len(bad),
                       accepted_events=len(np.unique(event[keep])), total_hits=len(event),
                       base_cut_hits=int(base.sum()), noise_events=len(bad),
@@ -186,10 +212,8 @@ def run(args):
         input_file.Close()
         print(f"Run {run}: {len(events)} events, reject {bad.tolist()}, {keep.sum()} accepted hits", flush=True)
 
-    if not results:
-        raise ValueError(f"No listed ntuple files found in {source}")
     selected = []
-    for voltage in sorted({r['voltage'] for r in results if r['voltage'] is not None}):
+    for voltage in sorted({r['voltage'] for r in results}):
         candidates = [r for r in results if r['voltage'] == voltage and r['run'] not in args.exclude_run]
         if not candidates:
             continue
@@ -199,8 +223,9 @@ def run(args):
         selected.append(winner)
 
     if not selected:
-        raise ValueError("No unambiguous eligible runs remain; check voltage assignments and excluded runs")
+        raise ValueError("No eligible runs remain; check DB drift_voltage_v values and --exclude-run")
 
+    mixed_setups = len({r['setup'] for r in selected}) > 1
     colors = ["#1559D4", "#D00000", "#008525", "#9A00B5", "#111111", "#E07000", "#009C9C", "#8B4513"]
     for normalized in (False, True):
         fig, ax = plt.subplots(figsize=(13, 7.5))
@@ -209,6 +234,8 @@ def run(args):
             if normalized and values.sum():
                 values /= values.sum()
             label = f"{result['voltage']:,} V | run {result['run']} | {result['total_events']:,} events"
+            if mixed_setups:
+                label += f" | {result['setup']}"
             ax.stairs(values, bins, color=colors[i % len(colors)], linestyle="-",
                       linewidth=1.8, label=label)
         # Counts preserves exposure differences; unit-area compares shapes,
@@ -226,41 +253,63 @@ def run(args):
         fig.savefig(out / f"{name}.pdf")
         plt.close(fig)
 
-    # Pad-index views use the physical ordering 0-249 medium, 250-409 large.
-    # Under the voltage-only Channel cut the large region will be empty.
-    fig, ax = plt.subplots(figsize=(13, 6))
+    # Pad numbers have meaning only within one setup and wiring snapshot.
+    # Keep the time overlay shared, but never overlay different pad maps.
+    pad_groups = {}
     for i, result in enumerate(selected):
-        ax.stairs(pad_data[result['run']]['counts'], np.arange(-0.5, 410.5),
-                  color=colors[i % len(colors)], linewidth=1.5,
-                  label=f"{result['voltage']:,} V | run {result['run']}")
-    ax.axvline(249.5, color="#777777", linewidth=0.8)
-    ax.set(xlim=(-0.5, 409.5), xlabel="Pad number (0-based)", ylabel="Accepted hits / pad",
-           title="TPC hits in physical pad order: medium 0–249, large 250–409")
-    ax.legend(loc="upper right")
-    ax.grid(alpha=0.15)
-    fig.text(0.5, 0.025, "Original Channel/Time cuts and noise vetoes apply before mapping. Unmapped electronics omitted only from pad plots.", ha="center", fontsize=9)
-    fig.tight_layout(rect=(0, 0.06, 1, 1))
-    fig.savefig(out / "hits_by_pad.png", dpi=180)
-    fig.savefig(out / "hits_by_pad.pdf")
-    plt.close(fig)
+        pad_groups.setdefault((result['setup'], result['pad_map_sha256']), []).append((i, result))
+    pad_plot_groups = []
+    for (setup, digest), group in pad_groups.items():
+        mapping = run_mappings[str(group[0][1]['run'])]
+        pad_count = mapping['pad_count']
+        pad_bins = np.arange(-0.5, pad_count + 0.5)
+        sections = mapping['sections']
+        description = ', '.join(f"{s['name'].lower()} {s['pad_range'][0]}–{s['pad_range'][1]}" for s in sections)
+        # Single-map scans retain the historical filenames, including LM.
+        suffix = ''
+        if len(pad_groups) > 1:
+            suffix = f'_{setup}'
+            if sum(key[0] == setup for key in pad_groups) > 1:
+                suffix += f'_{digest[:12]}'
+        pad_plot_groups.append(dict(setup=setup, pad_map_sha256=digest,
+                                    runs=[r['run'] for _, r in group],
+                                    hits_by_pad=f'hits_by_pad{suffix}', time_vs_pad=f'time_vs_pad{suffix}'))
+        fig, ax = plt.subplots(figsize=(13, 6))
+        for i, result in group:
+            ax.stairs(pad_data[result['run']]['counts'], pad_bins,
+                      color=colors[i % len(colors)], linewidth=1.5,
+                      label=f"{result['voltage']:,} V | run {result['run']}")
+        for section in sections[1:]:
+            ax.axvline(section['pad_range'][0] - 0.5, color="#777777", linewidth=0.8)
+        ax.set(xlim=(-0.5, pad_count - 0.5), xlabel="Pad number (0-based)", ylabel="Accepted hits / pad",
+               title=f"TPC hits in physical pad order ({setup}): {description}")
+        ax.legend(loc="upper right")
+        ax.grid(alpha=0.15)
+        fig.text(0.5, 0.025, "Detector + study cuts and noise vetoes apply. Both cut DBs and pad plots use the same per-run map snapshot.", ha="center", fontsize=9)
+        fig.tight_layout(rect=(0, 0.06, 1, 1))
+        fig.savefig(out / f"hits_by_pad{suffix}.png", dpi=180)
+        fig.savefig(out / f"hits_by_pad{suffix}.pdf")
+        plt.close(fig)
 
-    fig, axes = plt.subplots(len(selected), 1, figsize=(12, 3 * len(selected)), squeeze=False)
-    for ax, result in zip(axes.flat, selected):
-        mesh = ax.pcolormesh(np.arange(-0.5, 410.5), bins,
-                             pad_data[result['run']]['time_pad'].T, cmap="viridis", shading="flat", rasterized=True)
-        ax.axvline(249.5, color="white", linewidth=1)
-        ax.set(xlabel="Pad number (0-based)", ylabel="Time (native units)",
-               title=f"{result['voltage']:,} V | run {result['run']}")
-        fig.colorbar(mesh, ax=ax, label="Accepted hits")
-    fig.suptitle("Time versus continuous pad number (original cuts and event vetoes)")
-    fig.tight_layout(rect=(0, 0, 1, 0.98))
-    fig.savefig(out / "time_vs_pad.png", dpi=150)
-    fig.savefig(out / "time_vs_pad.pdf")
-    plt.close(fig)
+        fig, axes = plt.subplots(len(group), 1, figsize=(12, 3 * len(group)), squeeze=False)
+        for ax, (_, result) in zip(axes.flat, group):
+            mesh = ax.pcolormesh(pad_bins, bins,
+                                 pad_data[result['run']]['time_pad'].T, cmap="viridis", shading="flat", rasterized=True)
+            for section in sections[1:]:
+                ax.axvline(section['pad_range'][0] - 0.5, color="white", linewidth=1)
+            ax.set(xlabel="Pad number (0-based)", ylabel="Time (native units)",
+                   title=f"{result['voltage']:,} V | run {result['run']}")
+            fig.colorbar(mesh, ax=ax, label="Accepted hits")
+        fig.suptitle(f"Time versus continuous pad number ({setup}): {description}")
+        fig.tight_layout(rect=(0, 0, 1, 0.98))
+        fig.savefig(out / f"time_vs_pad{suffix}.png", dpi=150)
+        fig.savefig(out / f"time_vs_pad{suffix}.pdf")
+        plt.close(fig)
     write_csv(out / "pad_histograms.csv",
-              [dict(run=r['run'], voltage=r['voltage'], pad=p, count=int(n))
+              [dict(run=r['run'], voltage=r['voltage'], pad=p, count=int(n),
+                    setup=r['setup'], pad_map_sha256=r['pad_map_sha256'])
                for r in selected for p, n in enumerate(pad_data[r['run']]['counts'])],
-              ['run', 'voltage', 'pad', 'count'])
+              ['run', 'voltage', 'pad', 'count', 'setup', 'pad_map_sha256'])
     np.savez_compressed(out / "pad_time_histograms.npz",
                         **{f"run{r['run']}": pad_data[r['run']]['time_pad'] for r in selected})
 
@@ -268,9 +317,10 @@ def run(args):
     fig, axes = plt.subplots(occupancy_rows, 4, figsize=(15, 3.4 * occupancy_rows), squeeze=False)
     for ax, result in zip(axes.flat, results):
         occ = occupancy_data[result['run']]
-        ax.hist(occ, bins=np.arange(0.5, 577.5), histtype="step", color="#0072B2")
+        channel_count = max(result['channel_count'], int(np.max(occ, initial=0)))
+        ax.hist(occ, bins=np.arange(0.5, channel_count+1.5), histtype="step", color="#0072B2")
         ax.axvline(args.noise_channels - 0.5, color="#D55E00", linestyle="--")
-        ax.set(yscale="log", xlim=(0, 576), title=f"Run {result['run']} | vetoed: {result['noise_events']}",
+        ax.set(yscale="log", xlim=(0, channel_count), title=f"Run {result['run']} | vetoed: {result['noise_events']}",
                xlabel="Distinct channels / event", ylabel="Events")
     for ax in list(axes.flat)[len(results):]:
         ax.set_visible(False)
@@ -303,22 +353,28 @@ def run(args):
                                            alternative_min_hits_per_distinct_channel=MODULE_HITS_PER_CHANNEL,
                                            logic="module coverage AND (synchrony OR repeated hits)"),
                     event_count_definition="Number of distinct Event values present in the ntuple, before cuts",
-                    pad_mapping=dict(csv=str(args.pad_map.resolve()), pad_range=[0, 409],
-                                     medium_range=[0, 249], large_range=[250, 409],
+                    pad_mapping=dict(per_run=run_mappings,
                                      electronics_conversion="ROOT Channel = printed one-based FADC - 1",
-                                     unmapped="Pad=-1; excluded from pad plots, retained in time-only spectra"),
-                    voltage_conflicts=conflicts, missing_runs=missing, unmapped_runs=unmapped,
-                    overrides=args.voltage_override, excluded_runs=args.exclude_run, runs=results)
+                                     unmapped="Pad=-1; no pad bin; retained in time-only spectra if it passes both cut DBs"),
+                    setup_override=setup_override,
+                    pad_map_override=str(args.pad_map.resolve()) if args.pad_map is not None else None,
+                    pad_plot_groups=pad_plot_groups,
+                    voltage_assignment_source=str(database.path),
+                    voltage_assignment_snapshot='cuts_used.ini',
+                    voltage_assignment_definition="Detector DB drift_voltage_v, inherited global -> run; unknown voltages skipped; setup override changes geometry only",
+                    run_metadata=run_metadata, skipped_runs=skipped_runs,
+                    excluded_runs=args.exclude_run, runs=results)
     (out / "analysis.json").write_text(json.dumps(metadata, indent=2) + "\n")
     root_out = ROOT.TFile(str(out / "time_histograms.root"), "RECREATE")
+    ROOT.TNamed('analysis_metadata', json.dumps(metadata)).Write()
     for r in selected:
-        hist = ROOT.TH1D(f"time_run{r['run']}", f"{r['voltage']} V, run {r['run']};Time (native branch units);Accepted hits", TIME_CUT_MAX, -0.5, TIME_CUT_MAX - 0.5)
+        hist = ROOT.TH1D(f"time_run{r['run']}", f"{r['voltage']} V, run {r['run']} | {r['setup']};Time (native branch units);Accepted hits", TIME_CUT_MAX, -0.5, TIME_CUT_MAX - 0.5)
         for i, count in enumerate(r['histogram'], start=1):
             hist.SetBinContent(i, count)
             hist.SetBinError(i, np.sqrt(count))
         hist.SetEntries(r['accepted_hits'])
         hist.Write()
-        ph = ROOT.TH1D(f"pad_run{r['run']}", f"{r['voltage']} V;Pad number (0-based);Accepted hits", 410, -0.5, 409.5)
+        ph = ROOT.TH1D(f"pad_run{r['run']}", f"{r['voltage']} V, run {r['run']} | {r['setup']};Pad number (0-based);Accepted hits", r['pad_count'], -0.5, r['pad_count'] - 0.5)
         for i, count in enumerate(pad_data[r['run']]['counts'], start=1):
             ph.SetBinContent(i, int(count))
             ph.SetBinError(i, np.sqrt(count))
@@ -326,5 +382,5 @@ def run(args):
         ph.Write()
     root_out.Close()
     print("Selected:", [(r['voltage'], r['run']) for r in selected])
-    print("Conflicting assignments:", conflicts, "Missing runs:", missing)
+    print("Skipped runs (unknown drift_voltage_v):", [r['run'] for r in skipped_runs])
     print("Output:", out)

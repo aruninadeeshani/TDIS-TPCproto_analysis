@@ -1,0 +1,282 @@
+Personal C++/ROOT version validated against the established Python results.
+ROOT version: 6.40.04. No Python is called by the C++ program.
+
+- Interpreted TPC.C("check") passes wiring anchors, disconnected-channel
+  checks, strict Time bounds, hot-channel exclusions, separate event/voltage
+  selections, synchronous module-noise rejection and full board coverage.
+- ACLiC-compiled TPC.C+("check") passes the same checks.
+- The terminal menu successfully displays paths and active settings.
+- Compiled event export runs from /tmp with an absolute macro path.
+- A source-only copy in a different folder exports the event using its own
+  auxiliary files and explicitly supplied input; no Python folder is needed.
+- Native event examples retain 62 medium/6 large pads for run1615/event42535,
+  and 48 medium/2 large pads for run1616/event5584.
+- All 118 displayed hit values and pad/channel assignments match the Python
+  example table exactly. Additional CSV fields preserve Hit and pad geometry.
+- Across all 15 voltage runs, summary counts, selected files, all 1596 time
+  histogram bins and all 2870 pad histogram bins match the Python tables.
+- All 169 rejected events match, including detector-wide flags and each
+  module's distinct-channel, hit and synchronous-channel evidence.
+- Native ROOT display_hits TTrees match the plotted-hit CSVs (68 and 50
+  entries). All four event canvases reload, and ROOT scan-histogram totals
+  agree with their CSV summaries.
+- Working Python source and auxiliary files were verified byte-for-byte
+  unchanged after creating and testing this personal C++ version.
+
+The native formats are PNG/PDF, CSV, and ROOT objects/TTrees. This port does
+not require NumPy/Matplotlib or provide a NumPy NPZ output.
+No spatial track fit or drift-coordinate calibration was added.
+
+Readability update:
+- TPC.C was expanded to readable statements and ten clearly labeled sections,
+  with a source reading guide and comments beside important ROOT operations.
+- Every executable C++ token and string literal is identical to the earlier
+  tested source; only comments and whitespace changed.
+- TPC.C("check") passes. A saved run1616/event5584 example has an identical
+  displayed-hit CSV and pixel-identical Charge/Time PNGs in both 2D and 3D.
+- TPCDetector.h and settings.csv are byte-for-byte unchanged.
+
+Workspace organization, 2026-11-09:
+- Default ROOT input moved to data/root/; outputs are grouped under results/.
+- Existing data/mapping/settings contents are unchanged.
+- Python checks pass and the event5584 export retains 50 pads.
+- C++ info/check/save commands find the new input and generated veto ledger;
+  the displayed-hit CSV is identical to the preserved event export.
+- Python Charge/Time example PNGs are pixel-identical after path updates.
+- Current decoder passes a syntax-only compilation after its path updates.
+
+Shared cuts and raw inspection, 2026-11-09:
+- Manual rules are read from config/run_cuts.ini, shared with Python;
+  automatic-noise settings remain local. No new run exclusions are active.
+- Interpreted and ACLiC-compiled TPC.C("check") pass with the default DB.
+- tests/RunCutsCheck.C passes native global/run/profile scope checks,
+  inclusive ranges, correlated channel/time and charge thresholds, FADC/Pad
+  aliases, filtering before first-hit selection, missing branch failures,
+  invalid syntax rejection, and no hidden manual cuts with an empty DB.
+- All four full voltage CSV tables match the previous native outputs.
+- All seven raw and cleaned run1616 histograms match Python bin-for-bin:
+  876800 uncut rows and 465413 cleaned rows, using identical view ranges.
+- A temporary Channel 185 rule scoped to run1616 removes exactly one pad
+  from event5584 (50 -> 49) in both interfaces; working DB unchanged.
+- Raw command bypasses all cuts, including automatic event vetoes. Clean
+  mode and event/scan exports record the parsed manual DB as a snapshot.
+- The shareable ROOT bundle includes the shared config/ directory.
+
+Six-leaf canvas refinement, 2026-11-09:
+- Raw inspection omits Blockhead and plots Event, Channel, Hit, Time,
+  Charge, Pedestal: a 3-by-2 overview plus six individual canvases.
+- Python and native ROOT save all seven canvases and six TH1D histograms
+  in raw_histograms.root, plus PNG/PDF exports for every view.
+- Regenerated run1616 raw and cleaned outputs for both programs. All seven
+  canvases reload; their histogram bin contents exactly match the stored
+  histograms. Individual PNG/PDF exports exist for all six leaves.
+- Python/native bin counts still agree exactly: 876800 uncut hit rows and
+  465413 cleaned rows. All 14 Python selection/mapping checks pass.
+- Removed obsolete Blockhead CSVs from the four regenerated output folders.
+- Updated shared documentation, binning defaults and both source bundles.
+
+Always-mapped raw inspection, 2026-11-09:
+- Replaced the electronics Channel view with derived Pad in both programs,
+  using the established wiring independently of raw/clean selection.
+- Six views are now Event, Pad, Hit, Time, Charge, Pedestal. Pad defaults to
+  410 bins centered on 0..409 (medium 0..249, large 250..409).
+- Unconnected channels remain Pad=-1 in underflow; no hit rows are removed
+  by mapping. Their counts are annotated and recorded separately. Other
+  raw distributions remain unchanged. DB Channel rules retain electronics
+  semantics; Pad rules refer to the plotted physical numbering.
+- Prior Channel-only commands now alias Pad; both aliases were exercised.
+- Output carries pad_map_used.csv and a ROOT mapping note.
+- Regenerated run1616 raw/clean exports for both programs. Every Pad bin
+  agrees with a direct mapping of the original ntuple, including anchors
+  Pad0=Channel152, Pad24=Channel15, Pad250=Channel504, Pad409=Channel430.
+- All six distributions still match between Python and ROOT; all seven
+  canvases persist. Unmapped rows: 66446 raw, 27366 after cleaning.
+- All 15 Python tests pass. Removed superseded Channel CSV/PNG/PDF exports
+  from regenerated views and refreshed both source/config bundles.
+
+Separate Channel diagnostic and cut propagation, 2026-11-09:
+- Full inspection retains the six mapped summary panels and adds a separate
+  original Channel (0..575) canvas, including unconnected electronics.
+- Default output now has seven TH1D histograms and eight TCanvas views.
+  The summary's second panel remains Pad (0..409).
+- Python --branches Channel and native raw:Channel open just electronics;
+  focused exports go in branches_Channel/ and leave the full run ROOT file
+  byte-for-byte unchanged. Pad is no longer an alias of Channel.
+- Regenerated run1616 raw/cleaned outputs in both programs. All seven
+  histograms match bin-for-bin; Channel agrees directly with original
+  ntuple values, including unconnected channels. Each saved canvas reloads.
+- Temporary run1616 Channel152 exclusion removes exactly 444 Pad0 hits in
+  both cleaned Pad outputs, leaves every other pad unchanged, and reduces
+  entries by 444. No test exclusion was added to the working database.
+- Channel==152, FADC==153 and Pad==0 equivalence is documented inside the
+  DB and tested. All 16 Python mapping/selection tests pass.
+- ROOT Channel remains zero-based; printed fADC is Channel+1. Channel DB
+  conditions filter pulse rows before both mapped and electronics plots.
+- Updated guides, binning defaults, and both shareable source bundles.
+
+Plot terminology, 2026-11-09:
+- All raw-inspection y-axis labels now read Raw Hits in both programs.
+- Replaced abbreviated annotations with Underflow / Overflow and the plain
+  description Hits on unconnected channels. Counts use thousands separators
+  and the connection annotation appears on a separate line.
+- Regenerated run1616 raw/cleaned PNG/PDF and ROOT exports for both programs.
+- Verified labels in the saved ROOT histograms and canvases for both views.
+  All 28 histogram bin/count CSVs are byte-for-byte unchanged.
+- Updated the shared guide and both source/config bundles.
+
+Independent voltage-study configuration, 2026-11-09:
+- config/run_cuts.ini now contains only [global] and [run NNNN] detector
+  cleaning. The [voltage] block was removed and is no longer accepted.
+- config/voltage_study_cuts.ini preserves the original Channel >= 285
+  rejection for the independent voltage comparison only. Both programs
+  combine it with detector cleaning only in the voltage command.
+- Python --study-cuts-db and ROOT's optional eighth studyCutsDB argument
+  override the independent study file. Ordinary raw/cleaned/event workflows
+  do not open it; a missing study file cannot affect detector cleaning.
+- Voltage exports snapshot BOTH parsed databases separately and identify
+  the study DB in their metadata. Normal rule listings show detector cuts.
+- All 17 Python tests and native RunCutsCheck.C pass, including study-file
+  isolation, missing-file behavior, scope boundaries, and no hidden cuts.
+- Native TPC.C("check") passes. Full Python and ROOT voltage reruns retain
+  identical run_summary.csv, histograms.csv, pad_histograms.csv, and
+  rejected_events.csv across all 15 runs compared to previous outputs.
+- Shared guide, source comments, menu labels, signatures and both portable
+  source/config bundles have been updated. No new run exclusions enabled.
+
+Two-dimensional inspection, 2026-11-09:
+- Added raw2d / raw2d-clean in native ROOT and Python raw2d [--apply-cuts].
+  Default output is a 2x2 summary plus four individual canvases: Event vs
+  Pad, Hit vs Pad, Charge vs Pad, Time vs Charge. Pads are X in the first
+  three; Charge is X in the last. Hit means the stored pulse index.
+- Every accepted pulse fills one TH2 cell. Colour is Raw Hits, logarithmic
+  by default. Both engines save four TH2D objects and five editable TCanvas
+  objects, PNG/PDF views, sparse bin CSVs and summaries/config snapshots.
+- Shared config/raw_2d_plots.csv defines pairs and per-axis overrides.
+  Defaults preserve one pad/Hit/Time unit per bin, group 64 event IDs and
+  four charge units per bin. This does not change the 1D defaults.
+- Mapping always applies. Unconnected-channel hits survive in flow cells;
+  Time/Charge has no Pad axis and includes those hits. Cleaning uses only
+  detector global/run DB plus the automatic ledger, never the study DB.
+- Full run1616 raw and cleaned outputs were generated under each engine's
+  existing run folder, in 2d/ and cleaned/2d/. All eight dense histogram
+  matrices match between engines and a direct binning of original data.
+  Sparse CSVs agree numerically cell-for-cell, including every flow corner.
+- Raw pad views: 810354 visible + 66446 flow hits; cleaned: 438047 visible
+  + 27366 flow hits. Time/Charge: all 876800 raw or 465413 cleaned hits.
+- Entries, means, count conservation, native TH2/canvas reload and individual
+  exports were verified. All 21 Python tests pass. Native Raw2DCheck.C
+  passes synthetic mapping/cut, exact upper-edge and flow-corner tests.
+- Python display calls were mocked: five figures remain available until
+  show(), all files are already saved, and focused export preserves the
+  full output. Uncut inspection also works with an invalid detector DB.
+  No graphical desktop was launched during validation.
+- Normalized native source paths before deriving parent directories so
+  included macros/tests correctly locate shared configuration files.
+- Shared guide, source comments, menus and both portable bundles updated.
+
+Unified 1D/2D inspection, 2026-11-09:
+- raw and raw-clean now show both groups by default: eight 1D canvases and
+  five 2D canvases, including both summaries. Normal menus have one entry.
+- Python supports --1d / --2d / --both and --dimensions both|1d|2d.
+  Native ROOT takes flags inside the command, e.g. TPC("raw --1d",1616).
+- Python reads, maps and selects hits once and enters one shared show()
+  loop only after both groups are ready. Native ROOT reads the run once and
+  shares it between drawing helpers using the same cached cut configuration.
+- Focused branch/pair shortcuts and previous raw2d commands remain available.
+  Drawing helpers stay separate editable functions within the same scripts.
+- All 21 Python detector/axis tests pass. Synthetic Python integration checks
+  default/both, 1D-only, 2D-only and cleaned modes; one data read, one clean
+  selection, shared hit counts, figure cleanup and a single show() are
+  verified. GUI calls were mocked; all 13 figures are live at show().
+- Expanded Raw2DCheck.C passes public unified ROOT dispatch and --1d/--2d
+  flags, canvas counts, mapping/cuts, exact edges and flow-corner checks.
+- Full unified run1616 exports for both engines retain all 11 histogram
+  CSV tables byte-for-byte compared with the previous separate workflows.
+- Updated command help, source comments, guides and both shareable bundles.
+
+Illustrated manual, personal palette and CSV formatting, 2026-11-09:
+- Added docs/TPC_manual.tex and its 15-page PDF, with full workflow/cut/
+  mapping/plot/export instructions, commands, current configuration/help
+  snapshots and four ROOT example figures. Regenerated run1616 ROOT
+  inspection and event plots using the user's palette and current CSVs.
+- docs/build_manual.py refreshes excerpts/figures and compiles LaTeX twice.
+  --check tracks source/config/mapping/example hashes. Workspace AGENTS.md
+  requires future semantic updates and manual rebuilds. The builder also
+  supports engine-only bundles using carried figures/help snapshots.
+- TPC(...) now calls the existing user-defined set_color_env() before any
+  drawing, replacing SetPalette(kViridis). Preserved the user's RGB stops.
+  Native check verifies the expected first palette colour.
+- ROOT already trims CSV whitespace; Python plot-config readers now trim
+  headers and values consistently. Both 1D/2D padded space/tab examples
+  pass. Commas and empty-field positions remain required.
+- Preserved the user's plot orientation/binning and active detector DB
+  changes. Reference tests now use explicit fixtures rather than forcing
+  old working-DB values. All 22 Python checks and native TPC check pass.
+- The cuts command now explicitly says it only lists rules and prints the
+  raw-clean command for applying them. Manual explains listing vs plotting.
+- PDF compiled without overfull/undefined-reference warnings; inspected
+  rendered text pages and confirmed all four example images are embedded.
+- Source bundles now include docs/ (PDF, LaTeX, figures, builder, snapshots)
+  and AGENTS.md alongside their engine and shared config/.
+
+Public user/developer release, 2026-11-09:
+- Revised the manual: removed conversational CSV Q&A and maintenance sections,
+  added a command/option reference and voltage-study figure, and explicitly
+  described event displays as the present prototype under development.
+- Documented the complete automatic-veto algorithm and thresholds, including
+  detector occupancy, module occupancy, exact-time synchrony and multiplicity.
+  Explicit workflow table distinguishes OFF in raw plots, applying existing
+  ledger IDs in cleaned inspection/displays, and fresh detection in voltage.
+- Prepared a clean standalone repository under bundles/TDIS-TPCproto_analysis,
+  excluding archives, full local datasets, generated results and editor files.
+- Included an 80648-byte run1616 example: 264 complete events, 14713 pulses;
+  original-data/event selection and SHA-256 provenance are included.
+- Example cleaning agrees across engines at 1024 hits. Fresh classification
+  reproduces all seven supplied run1616 veto IDs. Event5584 exports correctly.
+- All 22 Python unit checks pass in the packaged tree. Added GitHub CI;
+  the initial public push passed the Python core checks.
+- Published PUBLIC repository ayerbeg/TDIS-TPCproto_analysis with main branch,
+  using an isolated Git repository so the parent TDIS tree is untouched.
+
+Large-first pad layout, 2026-11-16:
+- Large pads 0..159 occupy y=0..40 mm; Medium pads 160..409 occupy y=40..80 mm.
+- Pad0 = fADC505 = ROOT Channel504; next section starts Pad160 = fADC153.
+- Electronics wiring and local row/column order are unchanged.
+- Old/new Pad correspondence is in auxiliary/pad_renumbering.csv.
+- Translated active Pad rules preserve the physical exclusions (370->120; 261..263->11..13).
+- Exhaustive synthetic comparison: identical manual-cut masks for 6912 rows per run (1615/1616).
+- All 23 Python tests pass; native check, cut fixtures and raw-2D fixtures pass.
+- ROOT/Python event examples and representative run1616 ROOT raw/cleaned views refreshed.
+- Manual rebuilt and freshness checked; source bundles carry current docs/config.
+
+Run DB and detector setup framework, 2026-11-16:
+- Run DB now owns setup, drift_voltage_v and tilt_angle_deg (global defaults/run overrides).
+- Separate active run/voltage tables removed; 14 known assignments migrated, run1605 unknown.
+- Real medium/small electronics mapping awaits connector/fADC clarification; synthetic508-pad geometry tested.
+- All30 Python checks and native setup/voltage/veto/cut/raw fixtures pass.
+- Known-run voltage baseline: same seven winners, time/pad counts, noise evidence and histograms.
+- Unknown-voltage runs retain bundled vetoes; processed zero-veto runs keep live empty results.
+- Representative ROOT run1616 raw/cleaned/event plots refreshed; docs/bundles updated.
+
+Installed medium_small mapping:506 connected pads (250Medium+256Small),244blank Small cells.
+Legacy577/579 white cells omitted; connector labels are not fADC labels.
+31Python checks and real-map ROOT check/pipeline validated. Existing map kept.
+
+Replacement small.jpg checked: actual fADC image; independent transcription of all256 connected positions matches mapping; no numerical changes.
+small_image_audit.csv and provenance image hash refreshed; 32Python checks and native506-pad check pass.
+
+Correction: white labelled577/579 cells are connected, restored as Pad340/315.
+MS now508 connected pads (250Medium+258Small),242 unlabelled blanks.
+Channel axes cover ROOT0..578; higher-channel module grouping no longer aliases events.
+35Python checks, native ChannelCheck/Raw2DCheck/RunCutsCheck/both setup checks, and independent real-map CLI comparisons pass.
+Old/new medium_small PadIDs are in auxiliary/pad_renumbering_medium_small.csv; existing active LM cuts preserved.
+
+Expert-confirmed central gap, 2026-11-16 (supersedes the preceding restoration):
+- Detector expert confirms fADC577/579 are disconnected: Small Row3/Col25 and Row2/Col25.
+- Installed medium_small map:506 pads (250Medium+256Small),244 blank Small positions.
+- Those two positions have no Pad IDs; ROOT Channels576/578 map to Pad=-1.
+- Regenerate prior medium_small exports; old508->new506 Pad migration table includes the two removed positions.
+- Figure3:159 shared Large/Small labels,97 connected Small labels without Large counterpart; central gap white.
+- Numeric pad/fADC fonts enlarged by2pt in both medium_small diagrams; rendered bounds fit every pad without font reduction.
+- 35Python checks, native SelfCheck for both setups, ChannelCheck and Raw2DCheck pass.
+- Raw electronics/noise diagnostics retain unmapped channels; Large+Medium mapping and run1616 appearance are unchanged.

@@ -1,7 +1,7 @@
 usage: tpc.py event [-h] [--event EVENT] [--mode {2d,3d}] [--save]
                     [--input-dir INPUT_DIR] [--output-dir OUTPUT_DIR]
-                    [--pad-map PAD_MAP] [--cuts-db CUTS_DB]
-                    [--veto-file VETO_FILE]
+                    [--pad-map PAD_MAP] [--setup {large_medium,medium_small}]
+                    [--cuts-db CUTS_DB] [--veto-file VETO_FILE]
                     run_number
 
 positional arguments:
@@ -18,7 +18,10 @@ options:
   --output-dir OUTPUT_DIR
                         Where to save plots; default under results/python/ for
                         the chosen workflow
-  --pad-map PAD_MAP
+  --pad-map PAD_MAP     Explicit CSV override; otherwise select mapping from
+                        run DB
+  --setup {large_medium,medium_small}
+                        Override the run DB detector setup
   --cuts-db CUTS_DB     Shared detector global/run rejection database
   --veto-file VETO_FILE
                         Run/event veto CSV; otherwise use live output or

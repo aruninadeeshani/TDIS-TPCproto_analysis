@@ -55,7 +55,10 @@ for the exact thresholds, ledger lookup, and limitations for new datasets.
 - `config/raw_2d_plots.csv`: 2D pairs, orientations and axis overrides.
 - `analysis/settings.csv`, `analysis_root/settings.csv`: independent noise thresholds and histogram settings.
 
-Printed fADC is one-based; ROOT Channel is zero-based; Pads are numbered 0–409.
+Printed fADC is one-based; ROOT Channel is zero-based; Pads are numbered 0–409 for large/medium or 0–505 for medium/small.
+Large pads 0–159 are below medium pads 160–409; Pad0 = fADC505 = ROOT Channel504.
+Rows run left to right, then upward. Each engine includes `auxiliary/pad_renumbering.csv`
+to translate previous Pad IDs; electronics wiring is unchanged.
 A Channel cut removes the corresponding hits from mapped Pad plots too.
 The six main 1D quantities, a separate electronics Channel view, and configured 2D
 pairs are shown together by default. The current CSVs determine the precise binning
@@ -65,3 +68,11 @@ Additional ROOT files may be placed under `data/root/` or selected with an input
 They are ignored by Git. The single-run sample can exercise the voltage command,
 but the documented multi-voltage comparison requires additional runs.
 The manual's full-run illustrations are reference figures, not plots of the reduced example file.
+
+Run voltage, tilt and detector setup are read from `config/run_cuts.ini`.
+The separate voltage table has been retired; unknown voltages are skipped.
+Select `setup = medium_small` in a run block to use the additional 506-pad mapping
+(Medium 0–249, connected Small 250–505). Its diagram and electronics lookup are included.
+
+The expert-confirmed central Small-pad positions labelled fADC577/579 are disconnected.
+They remain physical gaps with no Pad IDs; mapping audits and diagrams record this exception.

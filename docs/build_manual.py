@@ -18,6 +18,9 @@ HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
 CONFIGS = ['run_cuts.ini', 'voltage_study_cuts.ini', 'raw_binning.csv', 'raw_2d_plots.csv']
 FIGURES = {
+    'pad_numbering.png': 'reference/wiring/pad_numbering.png',
+    'pad_numbering_medium_small.png': 'reference/wiring/pad_numbering_medium_small.png',
+    'small_vs_large_fadc.png': 'reference/wiring/small_vs_large_fadc.png',
     'voltage_overlay.png': 'results/root/voltage/time_overlay_counts.png',
     'raw_1d.png': 'results/root/raw/run1616/raw_overview.png',
     'raw_2d.png': 'results/root/raw/run1616/2d/raw2d_overview.png',
@@ -30,7 +33,11 @@ def inputs():
     paths += [PROJECT/'analysis'/name for name in ('tpc.py','detector.py','voltage.py','settings.csv')]
     paths += [PROJECT/'analysis_root'/name for name in ('TPC.C','TPCDetector.h','settings.csv')]
     paths += [PROJECT/'config'/name for name in CONFIGS]
-    paths += [PROJECT/engine/'auxiliary/pad_map.csv' for engine in ('analysis','analysis_root')]
+    paths += [PROJECT/engine/'auxiliary'/name for engine in ('analysis','analysis_root')
+              for name in ('pad_map.csv','pad_map_medium_small.csv',
+                           'pad_map_medium_small_provenance.json','small_image_audit.csv',
+                           'pad_renumbering_medium_small.csv','small_vs_large_fadc.csv',
+                           'small_vs_large_fadc_summary.json')]
     result={str(p.relative_to(PROJECT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.exists()}
     for name,source in FIGURES.items():
         path=PROJECT/source if (PROJECT/source).exists() else HERE/'figures'/name

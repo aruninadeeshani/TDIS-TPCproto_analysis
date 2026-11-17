@@ -66,18 +66,18 @@ class RunCutTests(unittest.TestCase):
         np.testing.assert_array_equal(db.keep({'Charge': values}), [False, True, True, True, True])
 
     def test_aliases_and_run_number_normalization(self):
-        db = self.database('[run 01616]\nreject = FADC == 153\nreject = Pad == 24\n')
+        db = self.database('[run 01616]\nreject = FADC == 153\nreject = Pad == 184\n')
         np.testing.assert_array_equal(db.keep({'Channel': np.array([152, 15, 150])}, 1616), [False, False, True])
 
     def test_channel_cut_propagates_to_the_mapped_pad(self):
         channels = np.array([152, 152, 150, 15, 504, 0])
         pads = channel_to_pad(channels)
         masks = [self.database(f'[run 1616]\nreject = {condition}\n').keep({'Channel': channels}, 1616)
-                 for condition in ('Channel == 152', 'FADC == 153', 'Pad == 0')]
+                 for condition in ('Channel == 152', 'FADC == 153', 'Pad == 160')]
         for keep in masks:
             np.testing.assert_array_equal(keep, [False, False, True, True, True, True])
-            self.assertNotIn(0, pads[keep])
-            self.assertIn(1, pads[keep])
+            self.assertNotIn(160, pads[keep])
+            self.assertIn(161, pads[keep])
         # An electronics exclusion acts on hit rows, including disconnected
         # channels, without reinterpreting the channel number as a pad ID.
         db = self.database('[run 1616]\nreject = Channel == 0\n')
@@ -113,16 +113,17 @@ class RunCutTests(unittest.TestCase):
         np.testing.assert_array_equal(edges, np.linspace(0, 100, 21))
 
     def test_mapped_raw_pad_counts_keep_unmapped_rows_in_underflow(self):
-        # Electronics are zero-based; printed fADC153 is Channel152, Pad0.
+        # Electronics are zero-based; fADC505 is Channel504, Pad0.
+        # Medium fADC153 now starts at Pad160, following all 160 large pads.
         channels = np.array([0, 152, 150, 15, 504, 575])
         pads = channel_to_pad(channels)
-        np.testing.assert_array_equal(pads, [-1, 0, 1, 24, 250, 395])
+        np.testing.assert_array_equal(pads, [-1, 160, 161, 184, 0, 145])
         np.testing.assert_array_equal(channels, [0, 152, 150, 15, 504, 575])
         edges, _ = raw_histogram_spec(pads, 'Pad')
         counts, _ = np.histogram(pads, edges)
         self.assertEqual(counts.sum() + (pads < edges[0]).sum(), len(channels))
         self.assertEqual(counts[0], 1)
-        self.assertEqual(counts[250], 1)
+        self.assertEqual(counts[160], 1)
         self.assertEqual((pads < edges[0]).sum(), 1)
 
 

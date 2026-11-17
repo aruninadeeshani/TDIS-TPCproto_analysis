@@ -80,7 +80,10 @@ outputs in \texttt{results/ENGINE/raw/runNNNN/}; cleaned outputs add
 
 \section{Command and option reference}
 The menus provide the same operations as the command interface. ROOT arguments are
-\texttt{TPC(command,run,event,inputDirectory,outputDirectory,vetoCSV,cutsDB,studyCutsDB)}.
+\begin{lstlisting}
+TPC(command, run, event, inputDirectory, outputDirectory,
+    vetoCSV, cutsDB, studyCutsDB, setup);
+\end{lstlisting}
 Empty strings retain defaults. Dimension flags belong inside the ROOT command string.
 \begin{longtable}{p{.22\linewidth}p{.27\linewidth}p{.41\linewidth}}
 \toprule ROOT command & Python command & Effect \\\midrule
@@ -113,14 +116,14 @@ check & check & Configuration/mapping regression checks; no data-cleaning plots.
 -{}-plots-file PATH & Alternate 2D pair/axis CSV.\\
 -{}-input-dir / -{}-output-dir & Select input directory and output root; see generated help for command-specific layout.\\
 -{}-pad-map PATH & Alternate Python mapping table. ROOT uses its auxiliary table.\\
--{}-cuts-db PATH & Complete replacement detector DB, including global rules; used only for cleaned data/displays.\\
+-{}-cuts-db PATH & Complete replacement detector DB: metadata applies to all commands; rejections apply to cleaned data/displays.\\
+-{}-setup large\_medium|medium\_small & Override the run/global detector setup; raw plots also use it.\\
 -{}-veto-file PATH & Explicit precomputed run/event veto ledger.\\
 -{}-event ID & Event to browse/export; otherwise the first eligible event is used.\\
 -{}-save / -{}-mode 2d|3d & Event export and display mode.\\
 -{}-example RUN:EVENT & Repeat to select Python examples.\\
 -{}-study-cuts-db PATH & Additional independent voltage-study restrictions only.\\
--{}-voltage-file PATH & Alternate run/voltage assignments.\\
--{}-voltage-override RUN=VOLTS & Resolve an ambiguous assignment; repeatable.\\
+\texttt{drift\_voltage\_v} in the detector DB & Run voltage used by the independent study. Blank/missing assignments are skipped.\\
 -{}-exclude-run RUN & Exclude a run from voltage overlays.\\
 -{}-noise-channels / -{}-module-channels / -{}-module-synchronous & Override noise detection thresholds during Python voltage processing; regenerate the ledger afterwards.\\
 \bottomrule
@@ -141,17 +144,150 @@ channel. The tree is named \texttt{ntuple}. Branches used by the analysis are:
 \texttt{Pedestal} & Stored pedestal value.\\
 \texttt{Blockhead} & Additional stored field, deliberately omitted from inspection plots.\\
 \end{longtable}
-The established wiring table is \texttt{auxiliary/pad\_map.csv} in each engine's
+The default large/medium wiring table is \texttt{auxiliary/pad\_map.csv} in each engine's
 folder. Printed fADC labels start at 1; \textbf{fADC = ROOT Channel + 1}.
 Pad numbers start at 0, increase left to right and bottom to top, and continue from
-medium pads 0--249 to large pads 250--409. Examples: fADC153 = Channel152 = Pad0;
-fADC16 = Channel15 = Pad24; fADC505 = Channel504 = Pad250.
+large pads 0--159 to medium pads 160--409. Pad0 is the lower-left large pad:
+fADC505 = Channel504 = Pad0. The first row ends at Pad19, followed by Pad20
+at the left of the next row. After the final large pad (fADC431 = Pad159),
+numbering continues with fADC153 = Channel152 = Pad160 and fADC16 = Channel15 = Pad184.
+Large pads occupy $y=0$--40\,mm; medium pads occupy $y=40$--80\,mm.
+The existing within-section row order, fADC wiring and pad dimensions are retained.
+
+\textbf{Migration from the previous numbering:} old medium pads 0--249 become
+160--409 (add 160); old large pads 250--409 become 0--159 (subtract 250).
+\texttt{auxiliary/pad\_renumbering.csv} records the complete old/new correspondence;
+\texttt{pad\_lookup.txt} and \texttt{pad\_numbering.pdf} provide a lookup and labelled diagram.
+Existing exports retain their original numbering and must be regenerated to use this layout.
+Pad-based rules in the working cut database have been translated to preserve the
+same physical exclusions. For other databases, translate Pad rules using the correspondence;
+Channel and FADC rules keep their values. Ranges crossing the old section boundary
+may need two rejection rules after translation.
 
 Mapping is a coordinate conversion, independent of cuts. Unconnected channels have
 \texttt{Pad=-1}. Their hits are retained in flow cells of Pad histograms. Other
 raw distributions, including the separate Channel diagnostic and time/charge
 correlations, retain those hits. \texttt{pad\_map\_used.csv} records the wiring used.
 \textbf{Do not add or subtract 1 from a Pad number.}
+
+\subsection{Run setup and informational metadata}
+The detector database also accepts \texttt{setup}, \texttt{drift\_voltage\_v}
+and \texttt{tilt\_angle\_deg}. Values in \texttt{[global]} are defaults;
+a run block overrides only the keys it contains. Blank numeric values mean
+unknown and clear inherited values. Voltage is in volts and supplies the independent
+voltage-study assignment; tilt is in degrees and is informational. Neither value
+is a hit cut, a drift calibration, nor an instruction to rotate the display.
+Duplicate keys, unknown setup names and nonfinite numbers are errors.
+\begin{lstlisting}
+[global]
+setup = large_medium
+
+[run 9999]
+# Illustrative run only: use actual run numbers and measured values.
+setup = medium_small
+drift_voltage_v = 8000
+tilt_angle_deg = 5
+\end{lstlisting}
+The setup \texttt{large\_medium} retains large pads 0--159 below medium pads
+160--409. The additional \texttt{medium\_small} setup uses medium pads at the
+bottom and only connected central small pads above them. Physical small-pad
+positions remain on a 50-column by 10-row grid of 2-mm squares; unconnected
+positions are empty spaces, with no invented channel or Pad ID. Pad numbering
+is continuous through connected pads, left to right and then upward.
+Its installed table is \texttt{auxiliary/pad\_map\_medium\_small.csv}:
+medium pads 0--249 (250 pads), then small pads 250--505 (256 connected pads).
+The remaining 244 physical small positions are unconnected, including the two
+central positions labelled 577 and 579 in the reference image.
+Pad 0 = fADC 153; Pad 250 = fADC 437 and Pad 505 = fADC 290.
+The board is $100\times60$\,mm.
+
+The current \texttt{small.jpg}, titled ``Small size fADC channel map'', supplies
+the fADC labels. It replaces an earlier picture of connector-pin numbers.
+The combined \texttt{small\_and\_medium.jpg} supplies their physical positions
+on the full board. \textbf{Expert confirmation overrides the printed labels:
+577 (Row 3, Col 25) and 579 (Row 2, Col 25) are not connected.} These two physical
+positions form a central gap and have no Pad IDs; ROOT Channels 576 and 578 map
+to Pad=-1. All other 256 connected Small positions retain their fADC labels.
+Red cells also remain mapped; their noise annotations do not introduce automatic cuts.
+No medium/small electronics labels overlap. The setup-specific
+\texttt{small\_image\_audit.csv} records the image labels, connectivity and
+corresponding Pad IDs; the provenance file records the replacement image hash.
+The expert-confirmed 506-pad map supersedes the earlier 508-pad version.
+\texttt{pad\_renumbering\_medium\_small.csv} translates its Pad IDs to the
+corrected map; an empty new Pad means that the old position is disconnected.
+Existing small/medium exports must be regenerated;
+Pad-based cuts in other small/medium DBs must be translated with that table.
+The working DB's active Pad rules use the separate large/medium setup and retain
+their existing values. Default Channel axes include the selected map's full span:
+0--575 for both supplied setups. Raw hits outside the mapped range are retained
+in electronics diagnostics and Pad underflow; automatic Channel axes expand to
+observed values, and explicit plotting limits still apply. Noise grouping retains
+observed channels above 575 without merging adjacent events.
+
+Setup resolution applies to \emph{uncut} inspection as well as cleaned plots
+and displays. Channel/FADC rules retain their electronics meaning; Pad rules
+refer to the selected setup, so a global Pad rule can select different electronics
+in different setups. Prefer Channel/FADC for exclusions shared across setups.
+\begin{lstlisting}
+python analysis/tpc.py info --run 1616
+python analysis/tpc.py raw 1616 --setup large_medium
+# Replace 9999 with a run that actually used this setup:
+python analysis/tpc.py raw 9999 --setup medium_small
+root -l 'analysis_root/TPC.C("raw",9999,-1,"","","","","","medium_small")'
+\end{lstlisting}
+An explicit Python \texttt{-{}-pad-map} CSV takes precedence over the setup switch.
+The command-line setup override takes precedence over run/global metadata.
+Run metadata and the actual mapping accompany exports. Default outputs for the
+additional setup are isolated under \texttt{results/ENGINE/setups/medium\_small/};
+large/medium outputs retain their existing paths. An explicit output directory
+uses the requested location. The default Pad axis spans all connected pads in
+the selected setup; explicit plotting bin/range overrides remain available.
+The detector DB is the sole source of run voltages: the separate run/voltage text
+file has been retired. The independent study still adds its separate hit-cut DB;
+its cuts are not run metadata.
+
+\clearpage
+\begin{figure}[p]
+\centering\includegraphics[width=\linewidth]{figures/pad_numbering.png}
+\caption{Current pad layout: large pads 0--159 below medium pads 160--409.
+P is the zero-based Pad ID; F is the one-based fADC label. Pad0/fADC505 is
+at the lower left. Numbering runs left to right in each row, then upward.}
+\end{figure}
+\begin{figure}[p]
+\centering\includegraphics[width=\linewidth]{figures/pad_numbering_medium_small.png}
+\caption{Additional medium/small setup: medium pads 0--249 below connected small
+pads 250--505. White positions, including the expert-confirmed 577/579 gap,
+have no Pad IDs. P is Pad and F is the one-based fADC label. Electronics labels are
+verified against the current \texttt{small.jpg}; physical placement follows the
+combined small/medium sketch.}
+\end{figure}
+\begin{figure}[p]
+\centering\includegraphics[width=\linewidth]{figures/small_vs_large_fadc.png}
+\caption{Small-pad fADC correspondence with the connected Large-pad wiring.
+Orange marks 97 connected Small channels absent from the Large table; green
+marks the 159 shared labels. The central 577/579 positions are white gaps without
+Pad IDs, following expert confirmation. Pad/fADC labels are enlarged by 2\,pt
+and their rendered bounds are checked to stay inside each box. The view covers
+$x=24$--78\,mm. This comparison adds no hit cuts.}
+\end{figure}
+\clearpage
+
+\subsection{Small-to-Large fADC correspondence}
+The largest fADC label connected to a Large pad is 576, assigned to Large Pad 145.
+Comparison uses exact membership in that wiring table, rather than simply testing
+whether a Small label is below 576. Of 256 connected Small pads, 159 have a
+connected Large-pad counterpart and 97 do not; all 97 are below 576. The two
+labels 577/579 are disconnected and are excluded from this connected-pad comparison.
+Large fADC 576 is absent from the current
+Small mapping. A shared fADC label does not imply the same Pad ID or physical position.
+
+\texttt{auxiliary/small\_vs\_large\_fadc.csv} lists every connected Small pad,
+its fADC/ROOT Channel, and the corresponding \texttt{LargePad} when one exists.
+\texttt{HasLargePad=0} and an empty \texttt{LargePad} identify the 97 marked
+channels. No connected Small label exceeds the Large maximum; disconnected
+labels 577/579 remain recorded in the image audit. The accompanying
+text summary lists their compressed ranges. The comparison figure highlights
+these channels without changing mapping, connectivity or analysis selections.
 
 \section{Detector-cleaning database}
 Edit \texttt{config/run\_cuts.ini}. It contains only common \texttt{[global]} and
@@ -178,7 +314,7 @@ There are no arbitrary functions, parentheses, or \texttt{||}; add another rejec
 line for OR. Invalid syntax and missing branches produce explicit errors.
 
 \subsection{Channels, fADC and pads in cuts}
-\texttt{Channel == 152}, \texttt{FADC == 153}, and \texttt{Pad == 0} are equivalent
+\texttt{Channel == 504}, \texttt{FADC == 505}, and \texttt{Pad == 0} are equivalent
 ways to reject the same connected pad. One is sufficient. Rejections act on hit rows
 before populating \emph{all} cleaned plots, including mapped Pad plots. A pure Event
 rule removes every matching event's row; a Channel/Time rule removes only matching
@@ -236,7 +372,7 @@ ROOT raw / raw -{}-1d / raw -{}-2d; Python raw without -{}-apply-cuts; raw2d sho
 ROOT raw-clean; Python raw -{}-apply-cuts (1D or 2D) &
 \textbf{ON, using the existing veto ledger}. Entire matching events are removed in addition to detector DB cuts.\\
 Event/event3d, save and examples & \textbf{ON, using the existing ledger}, before selecting the first passing pulse per channel for display.\\
-Independent voltage study & \textbf{Detects afresh} from each available listed run's full input, applies the resulting vetoes and writes a new ledger. Its separate study hit cuts do not restrict the noise-classifier input.\\
+Independent voltage study & \textbf{Detects afresh} from each available run with a known DB voltage, applies the resulting vetoes and writes a new ledger. Its separate study hit cuts do not restrict the noise-classifier input.\\
 cuts & Lists manual DB rules only. It neither detects noise nor opens data plots.\\
 \bottomrule
 \end{longtable}
@@ -248,8 +384,12 @@ remove noisy events.
 \paragraph{Where the veto IDs come from.}
 The ledger is keyed by \texttt{(run,event)}, never event number alone. Python prefers
 \path{results/python/voltage/rejected_events.csv}; ROOT prefers the equivalent under
-its configured output root. Otherwise the engine uses its bundled auxiliary ledger
-(Python also accepts the former legacy layout). An explicit veto override takes
+its configured output root, including setup-specific outputs. When an adjacent
+\texttt{run\_summary.csv} exists, a generated ledger is used only for runs listed
+there as processed. Other runs retain the bundled auxiliary veto snapshot; thus a
+run skipped for unknown voltage does not lose its established noise vetoes.
+A processed run with zero vetoes keeps its fresh, empty result instead of inheriting
+old noise IDs. Python also accepts the former legacy layout. An explicit veto override takes
 precedence. CSV evidence includes distinct-channel occupancy, total pulses,
 detector-wide flags and per-module flooding evidence.
 
@@ -257,7 +397,7 @@ detector-wide flags and per-module flooding evidence.
 IDs already present in this ledger. If a run has no rows in the ledger, no automatic
 IDs are vetoed for that run; an empty run entry is not evidence that a new dataset
 was scanned. If the ledger is missing, cleaning raises an error. For new data,
-regenerate the ledger using the voltage workflow with the relevant run listed, or
+regenerate the ledger using the voltage workflow with that run's DB voltage set, or
 supply a validated run/event CSV using -{}-veto-file (Python) or vetoCSV (ROOT).
 After changing noise thresholds, regenerate the ledger: changing settings alone
 cannot change IDs in an existing file. Explicitly override the ledger when unrelated
@@ -266,7 +406,7 @@ the next cleaned invocation; they do not regenerate the automatic ledger.
 
 \section{One-dimensional histograms and annotations}
 The 3-by-2 summary shows Event, Pad, Hit, Time, Charge and Pedestal. Each has an
-individual canvas. Original Channel (0--575) is an additional independent diagnostic,
+individual canvas. Original Channel (0--575 for large/medium; 0--578 for medium/small) is an additional independent diagnostic,
 including unconnected inputs. All histograms count \textbf{Raw Hits}.
 
 \textbf{Underflow} counts values below the lower edge; \textbf{Overflow} counts values
@@ -361,9 +501,13 @@ root -l -b -q 'analysis_root/TPC.C("voltage")'
 python analysis/tpc.py voltage
 python analysis/tpc.py voltage --study-cuts-db config/voltage_study_cuts.ini
 \end{lstlisting}
-The run/voltage table is \texttt{data/datafiles-voltage.txt} for Python and the
-ROOT auxiliary copy for ROOT. Conflicting voltage assignments are excluded until
-corrected (Python also has \texttt{-{}-voltage-override RUN=VOLTS}). Repeated voltages
+Both engines discover available \texttt{ntupleNNNN.root} files and read each run's
+\texttt{drift\_voltage\_v} from \texttt{config/run\_cuts.ini}, including global/run
+inheritance. Missing or blank voltages are unknown and skipped with a diagnostic.
+The former separate run/voltage text file and its command-line options have been
+removed. Historical unambiguous assignments have been migrated to run blocks;
+run1605 is blank because its old table listed both 8250 and 8500\,V. Resolve that
+value directly in its run block. Repeated voltages
 select the eligible file with most distinct events before cuts; ties use clean event
 count and then the lower run ID. Excluded scan runs are configured in settings.
 
@@ -405,7 +549,7 @@ The ROOT interface has the following optional positional parameters; empty strin
 retain defaults:
 \begin{lstlisting}
 TPC(command, run, event, inputDirectory, outputDirectory,
-    vetoCSV, cutsDB, studyCutsDB);
+    vetoCSV, cutsDB, studyCutsDB, setup);
 // Example export with alternate input and detector DB:
 TPC("save",1616,5584,"/path/to/data","/path/to/output","","/path/to/cuts.ini");
 \end{lstlisting}
